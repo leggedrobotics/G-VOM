@@ -1267,23 +1267,20 @@ class Gvom:
     @cuda.jit
     def __normalize_mean(metrics, cell_count):
         i, j = cuda.grid(2)
-        if(i>=cell_count):
+        if i >= cell_count:
             return
-        if(j>=3):
+        if j >= 3:
             return
-
-        metrics[i,j] = metrics[i,j]/metrics[i,9]
+        metrics[i, j] = metrics[i, j]/metrics[i, 9]
 
     @staticmethod
     @cuda.jit
-    def __calculate_covariance(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, count, metrics, point_count, origin, xy_eigen_dist, z_eigen_dist):
+    def __calculate_covariance(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, count,metrics,
+                               point_count, origin, xy_eigen_dist, z_eigen_dist):
         i = cuda.grid(1)
-        if(i < point_count):
-
-            d2 = points[i, 0]*points[i, 0] + points[i, 1] * \
-                points[i, 1] + points[i, 2]*points[i, 2]
-
-            if(d2 < min_distance*min_distance):
+        if i < point_count:
+            d2 = points[i, 0]*points[i, 0] + points[i, 1] * points[i, 1] + points[i, 2]*points[i, 2]
+            if d2 < min_distance*min_distance:
                 return
 
             local_point = cuda.local.array(shape=3, dtype=numba.float64)
@@ -1293,31 +1290,24 @@ class Gvom:
             z_index_base = math.floor((points[i, 2]/z_resolution) - origin[2])
 
             for x_index in range(x_index_base - xy_eigen_dist,  x_index_base + 1 + xy_eigen_dist):
-
-                if(x_index < 0 or x_index >= xy_size):
+                if x_index < 0 or x_index >= xy_size:
                     continue
 
                 for y_index in range(y_index_base - xy_eigen_dist, y_index_base + 1 + xy_eigen_dist ):
-
-                    if(y_index < 0 or y_index >= xy_size):
+                    if y_index < 0 or y_index >= xy_size:
                         continue
 
                     for z_index in range(z_index_base - z_eigen_dist, z_index_base + 1 + z_eigen_dist):
-
-                        if(z_index < 0 or z_index >= z_size):
+                        if z_index < 0 or z_index >= z_size:
                             continue
-
-                        
 
                         local_point[0] = (points[i, 0]/xy_resolution) - origin[0] - x_index
                         local_point[1] = (points[i, 1]/xy_resolution) - origin[1] - y_index
                         local_point[2] = (points[i, 2]/z_resolution) - origin[2] - z_index
 
-
-                        index = index_map[int( x_index + y_index*xy_size + z_index*xy_size*xy_size )]
-
-                        if index <0 :
-                                continue
+                        index = index_map[int(x_index + y_index*xy_size + z_index*xy_size*xy_size)]
+                        if index < 0:
+                            continue
 
                         # xx
                         cov_xx = (local_point[0] - metrics[index,0])*(local_point[0] - metrics[index,0])
@@ -1342,66 +1332,51 @@ class Gvom:
     @cuda.jit
     def __normalize_covariance(metrics, cell_count):
         i, j = cuda.grid(2)
-        if(i>=cell_count):
+        if i >= cell_count:
             return
-        if(j>=6):
-            return
-
-        if(metrics[i,9] <= 0):
-            metrics[i,j+3] = 0
+        if j >= 6:
             return
 
-        metrics[i,j+3] = metrics[i,j+3]/metrics[i,9]
+        if metrics[i, 9] <= 0:
+            metrics[i, j+3] = 0
+            return
+        metrics[i, j+3] = metrics[i, j+3]/metrics[i, 9]
 
     @staticmethod
     @cuda.jit
     def __calculate_min_height(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, min_height, point_count, origin):
         i = cuda.grid(1)
-        if(i < point_count):
-
+        if i < point_count:
             d2 = points[i, 0]*points[i, 0] + points[i, 1] * points[i, 1] + points[i, 2]*points[i, 2]
-
-            if(d2 < min_distance*min_distance):
+            if d2 < min_distance*min_distance:
                 return
 
             x_index = math.floor((points[i, 0]/xy_resolution) - origin[0])
-            if(x_index < 0 or x_index >= xy_size):
+            if x_index < 0 or x_index >= xy_size:
                 return
 
             y_index = math.floor((points[i, 1]/xy_resolution) - origin[1])
-            if(y_index < 0 or y_index >= xy_size):
+            if y_index < 0 or y_index >= xy_size:
                 return
 
             z_index = math.floor((points[i, 2]/z_resolution) - origin[2])
-            if(z_index < 0 or z_index >= z_size):
+            if z_index < 0 or z_index >= z_size:
                 return
 
             local_point = cuda.local.array(shape=3, dtype=numba.float64)
-            
-
             local_point[0] = (points[i, 0]/xy_resolution) - origin[0] - x_index
             local_point[1] = (points[i, 1]/xy_resolution) - origin[1] - y_index
             local_point[2] = (points[i, 2]/z_resolution) - origin[2] - z_index
 
-            
             index = index_map[int(x_index + y_index*xy_size + z_index*xy_size*xy_size)]
-
             cuda.atomic.min(min_height, index, local_point[2])
 
     @staticmethod
     @cuda.jit
     def __calculate_eigenvalues(voxels_eigenvalues,metrics,cell_count):
         i = cuda.grid(1)
-
-        if(i >= cell_count):
+        if i >= cell_count:
             return
-
-        # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz
-        #       0  1  2               3   4   5   6   7   8
-
-        # [xx   xy   xz]
-        # [xy   yy   yz]
-        # [xz   yz   zz]
 
         xx = metrics[i,3]
         xy = metrics[i,4]
@@ -1411,27 +1386,18 @@ class Gvom:
         zz = metrics[i,8]
         
         # https://en.wikipedia.org/wiki/Eigenvalue_algorithm#3%C3%973_matrices
-
         p1 = xy*xy + xz*xz + yz*yz  
         q = (xx + yy + zz ) / 3.0
-        
-        if (p1 == 0): # diagonal matrix
-
-            voxels_eigenvalues[i,0] = max(xx,max(yy,zz))
-            
-            voxels_eigenvalues[i,2] = min(xx,min(yy,zz))
-
+        if p1 == 0:
+            # diagonal matrix
+            voxels_eigenvalues[i,0] = max(xx, max(yy, zz))
+            voxels_eigenvalues[i,2] = min(xx, min(yy, zz))
             voxels_eigenvalues[i,1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
-
-
         else:
-
-            
             p2 = (xx - q)*(xx - q) + (yy - q)*(yy - q) + (zz - q)*(zz - q) + 2.0 * p1
             p = math.sqrt(p2 / 6.0)
             
             B = numba.cuda.local.array(shape=6, dtype=numba.float64)
-
             B[0] = (xx - q)/p
             B[1] = xy / p
             B[2] = xz / p
@@ -1439,34 +1405,33 @@ class Gvom:
             B[4] = yz / p
             B[5] = (zz - q)/p
 
-
-            r =  B[0] * ( B[3] * B[5] - B[4] * B[4] ) - B[1] * ( B[1] * B[5] - B[4] * B[2] ) + B[2] * ( B[1] * B[4] - B[3] * B[2] )
+            r =  B[0] * (B[3] * B[5] - B[4] * B[4]) - B[1] * (B[1] * B[5] - B[4] * B[2]) + B[2] * (B[1] * B[4] - B[3] * B[2])
             r = r / 2
 
             phi = 0.0
-            if (r <= -1):
+            if r <= -1:
                 phi = math.pi / 3.0
-            elif (r >= 1):
+            elif r >= 1:
                 phi = 0.0
             else:
                 phi = math.acos(r) / 3.0
 
-            voxels_eigenvalues[i,0] = q + 2.0 * p * math.cos(phi)
-            voxels_eigenvalues[i,2] = q + 2.0 * p * math.cos(phi + (2.0*math.pi/3.0))
-            voxels_eigenvalues[i,1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
+            voxels_eigenvalues[i, 0] = q + 2.0 * p * math.cos(phi)
+            voxels_eigenvalues[i, 2] = q + 2.0 * p * math.cos(phi + (2.0*math.pi/3.0))
+            voxels_eigenvalues[i, 1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
 
     @staticmethod
     @cuda.jit
     def __init_1D_array(array,value,length):
         i = cuda.grid(1)
-        if(i>=length):
+        if i >= length:
             return
         array[i] = value
 
     @staticmethod
     @cuda.jit
     def __init_2D_array(array,value,width,height):
-        x,y = cuda.grid(2)
-        if(x>=width or y>=height):
+        x, y = cuda.grid(2)
+        if x >= width or y >= height:
             return
-        array[x,y] = value
+        array[x, y] = value
