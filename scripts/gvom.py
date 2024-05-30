@@ -164,7 +164,7 @@ class Gvom:
             self.buffer_index = 0
 
     def combine_maps(self):
-        """ Combines all maps in the buffer and processes into 2D maps """
+        """ Combines all maps in the buffer and processes the resultant map into 2D maps """
         if self.origin_buffer[self.last_buffer_index] is None:
             print("ERROR: No data in buffer")
             return
