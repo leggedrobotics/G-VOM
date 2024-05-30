@@ -165,83 +165,94 @@ class Gvom:
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes into 2D maps """
-        #voxel_start_time = time.time()
-        if(self.origin_buffer[self.last_buffer_index] is None):
+        if self.origin_buffer[self.last_buffer_index] is None:
             print("ERROR: No data in buffer")
             return
 
+        ###### Combine the lookup tables, calculate total number of occupied voxels ######
         self.combined_origin = cuda.to_device(self.origin_buffer[self.last_buffer_index].copy_to_host())
+        combined_origin_world = self.combined_origin.copy_to_host()
+        combined_origin_world[0] = combined_origin_world[0] * self.xy_resolution
+        combined_origin_world[1] = combined_origin_world[1] * self.xy_resolution
+        combined_origin_world[2] = combined_origin_world[2] * self.z_resolution
 
         combined_cell_count = np.zeros([1], dtype=np.int64)
-        self.combined_index_map = cuda.device_array([self.xy_size*self.xy_size*self.z_size], dtype=np.int32)
-        self.__init_1D_array[self.blocks,self.threads_per_block](self.combined_index_map,-1,self.xy_size*self.xy_size*self.z_size)
-
+        self.combined_index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
+        self.__init_1D_array[self.blocks,self.threads_per_block](self.combined_index_map, -1, self.voxel_count)
 
         blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
         blockspergrid_z = math.ceil(self.z_size / self.threads_per_block_3D[2])
         blockspergrid = (blockspergrid_xy, blockspergrid_xy, blockspergrid_z)
 
-        # Combines the index maps and calculates the nessisary size for the combined map
-
-        for i in range(0, self.buffer_size):
+        for i in range(self.buffer_size):
+            # Combine maps currently in the buffer
             self.semaphores[i].acquire()
-            if(self.origin_buffer[i] is None):
+            if self.origin_buffer[i] is None:
                 self.semaphores[i].release()
                 continue
-
-            
-            self.__combine_indices[blockspergrid, self.threads_per_block_3D](
-                combined_cell_count, self.combined_index_map, self.combined_origin, self.index_buffer[i], self.voxel_count, self.origin_buffer[i], self.xy_size, self.z_size)
+            self.__combine_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
+                                                                             self.combined_origin, self.index_buffer[i],
+                                                                             self.voxel_count, self.origin_buffer[i],
+                                                                             self.xy_size, self.z_size)
             self.semaphores[i].release()
 
-        if not (self.last_combined_origin is None):
-             #print("combine_old_indices")
-             #__combine_old_indices
-            self.__combine_old_indices[blockspergrid, self.threads_per_block_3D](
-                 combined_cell_count, self.combined_index_map, self.combined_origin, self.last_combined_index_map, self.voxel_count, self.last_combined_origin, self.xy_size, self.z_size)
-
+        if not self.last_combined_origin is None:
+            # If previous merged map exists, combine it too
+            self.__combine_old_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
+                                                                                 self.combined_origin,
+                                                                                 self.last_combined_index_map, self.voxel_count,
+                                                                                 self.last_combined_origin, self.xy_size,
+                                                                                 self.z_size)
         self.combined_cell_count_cpu = combined_cell_count[0]
-        # print(self.combined_cell_count_cpu)
 
+        ###### Combine the data ######
         blockspergrid_cell = math.ceil(self.combined_cell_count_cpu/self.threads_per_block)
         self.combined_hit_count = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_hit_count,0,self.combined_cell_count_cpu)
-                
+        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_hit_count, 0, self.combined_cell_count_cpu)
+
         self.combined_total_count = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_total_count,0,self.combined_cell_count_cpu)
+        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_total_count, 0, self.combined_cell_count_cpu)
 
         self.combined_min_height = cuda.device_array([self.combined_cell_count_cpu], dtype=np.float32)
-        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_min_height,1,self.combined_cell_count_cpu)
+        self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_min_height, 1, self.combined_cell_count_cpu)
 
         blockspergrid_cell_2D = math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_metric_2D)
 
         self.combined_metrics = cuda.device_array([self.combined_cell_count_cpu,self.metrics_count], dtype=np.float32)
-        self.__init_2D_array[blockspergrid_2D,self.threads_per_block_2D](self.combined_metrics,0,self.combined_cell_count_cpu, self.metrics_count)
+        self.__init_2D_array[blockspergrid_2D,self.threads_per_block_2D](self.combined_metrics,0,self.combined_cell_count_cpu,
+                                                                         self.metrics_count)
 
-        # Combines the data in the buffer
         for i in range(0, self.buffer_size):
-            
+            # Combine maps currently in the buffer
             self.semaphores[i].acquire()
-
-            if(self.origin_buffer[i] is None):
+            if self.origin_buffer[i] is None:
                 self.semaphores[i].release()
                 continue
-            
-            
-            self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,self.combined_total_count,self.combined_min_height, self.combined_index_map, self.combined_origin, self.metrics_buffer[
-                                                                             i], self.hit_count_buffer[i],self.total_count_buffer[i], self.min_height_buffer[i],self.index_buffer[i], self.origin_buffer[i], self.voxel_count, self.metrics, self.xy_size, self.z_size, len(self.metrics))
-            
+            self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
+                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_index_map, self.combined_origin,
+                                                                             self.metrics_buffer[i], self.hit_count_buffer[i],
+                                                                             self.total_count_buffer[i], self.min_height_buffer[i],
+                                                                             self.index_buffer[i], self.origin_buffer[i],
+                                                                             self.voxel_count, self.metrics, self.xy_size,
+                                                                             self.z_size, len(self.metrics))
             self.semaphores[i].release()
 
-        # fill unknown cells with data from the last combined map
         if not (self.last_combined_origin is None):
-                #__combine_old_metrics
-            self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,self.combined_total_count,self.combined_min_height, self.combined_index_map, self.combined_origin, self.last_combined_metrics,
-                                                                                  self.last_combined_hit_count,self.last_combined_total_count,self.last_combined_min_height, self.last_combined_index_map, self.last_combined_origin, self.voxel_count, self.metrics, self.xy_size, self.z_size, len(self.metrics))
-
-        # set the last combined map
+            # If previous merged map exists, combine it too
+            self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
+                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_index_map, self.combined_origin,
+                                                                             self.last_combined_metrics,
+                                                                             self.last_combined_hit_count,
+                                                                             self.last_combined_total_count,
+                                                                             self.last_combined_min_height,
+                                                                             self.last_combined_index_map,
+                                                                             self.last_combined_origin,
+                                                                             self.voxel_count, self.metrics, self.xy_size,
+                                                                             self.z_size, len(self.metrics))
 
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
         self.last_combined_hit_count = self.combined_hit_count
@@ -251,28 +262,23 @@ class Gvom:
         self.last_combined_min_height = self.combined_min_height
         self.last_combined_origin = self.combined_origin
 
-        # Compute eigenvalues for each voxel
+        ###### Calculate eigenvalues for each voxel ######
         blockspergrid_cell_2D = math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_eigenvalue_2D = math.ceil(3 / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_eigenvalue_2D)
 
-        self.voxels_eigenvalues = cuda.device_array([self.combined_cell_count_cpu,3], dtype=np.float32)
-        self.__init_2D_array[blockspergrid_2D,self.threads_per_block_2D](self.voxels_eigenvalues,0,self.combined_cell_count_cpu, 3)
-
-        self.__calculate_eigenvalues[blockspergrid_cell,self.threads_per_block](self.voxels_eigenvalues,self.combined_metrics,self.combined_cell_count_cpu)
-
-
-        #print("voxel map rate = " + str(1.0 / (time.time() - voxel_start_time)))
-        #map_start_time = time.time()
+        self.voxels_eigenvalues = cuda.device_array([self.combined_cell_count_cpu, 3], dtype=np.float32)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.voxels_eigenvalues, 0, self.combined_cell_count_cpu, 3)
+        self.__calculate_eigenvalues[blockspergrid_cell, self.threads_per_block](self.voxels_eigenvalues, self.combined_metrics,
+                                                                                 self.combined_cell_count_cpu)
 
         # Make 2d maps from combined map
+        ###### Create a height map ######
+        self.height_map = cuda.device_array([self.xy_size, self.xy_size])
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.height_map, -1000.0, self.xy_size, self.xy_size)
 
-        # Make height map from minimum height in lowest cell
-        self.height_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.height_map,-1000.0,self.xy_size,self.xy_size)
-        
-        self.inferred_height_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.inferred_height_map,-1000.0,self.xy_size,self.xy_size)
+        self.inferred_height_map = cuda.device_array([self.xy_size, self.xy_size])
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.inferred_height_map, -1000.0, self.xy_size, self.xy_size)
 
         self.ego_semaphore.acquire()
         self.__make_height_map[blockspergrid, self.threads_per_block_2D](
@@ -281,8 +287,8 @@ class Gvom:
 
         self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
             self.combined_origin, self.combined_index_map, self.xy_size, self.z_size, self.z_resolution, self.inferred_height_map)
-        # Estimate ground slope
 
+        ###### Estimate ground slope ######
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map,-1.0,self.xy_size,self.xy_size)
 
@@ -295,46 +301,42 @@ class Gvom:
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
 
-        # Guess what the height is in unobserved cells
-        self.guessed_height_delta = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta,0.0,self.xy_size,self.xy_size)
-        
-        self.__guess_height[blockspergrid, self.threads_per_block_2D](
-            self.height_map,self.inferred_height_map,self.xy_size,self.xy_resolution,self.x_slope_map,self.y_slope_map,self.guessed_height_delta)
+        ###### Guess the height in unobserved cells ######
+        self.guessed_height_delta = cuda.device_array([self.xy_size, self.xy_size])
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta, 0.0, self.xy_size, self.xy_size)
+        self.__guess_height[blockspergrid, self.threads_per_block_2D](self.height_map, self.inferred_height_map, self.xy_size,
+                                                                      self.xy_resolution, self.x_slope_map, self.y_slope_map,
+                                                                      self.guessed_height_delta)
 
+        ###### Check for positive obstacles ######
+        # Any cell where the max height is more than "threshold" above the height map and less than "threshold + robot height" is
+        # marked as an obstacle. Obstacle type can be determined from cell metrics.
+        positive_obstacle_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](positive_obstacle_map, 0, self.xy_size, self.xy_size)
+        self.__make_positive_obstacle_map[blockspergrid, self.threads_per_block_2D](self.combined_index_map, self.height_map,
+                                                                                    self.xy_size, self.z_size, self.z_resolution,
+                                                                                    self.positive_obstacle_threshold,
+                                                                                    self.combined_hit_count,
+                                                                                    self.combined_total_count, self.robot_height,
+                                                                                    self.combined_origin,self.x_slope_map,
+                                                                                    self.y_slope_map,self.slope_obstacle_threshold,
+                                                                                    positive_obstacle_map)
 
-        # Check for positive obstacles. Any cell where the max height is more than "threshold" above the height map and less than "threshold + robot height" is marked as an obstacle
-        # Obstacle type can be determined from cell metrics
-        positive_obstacle_map = cuda.device_array([self.xy_size,self.xy_size],dtype=np.int32)
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](positive_obstacle_map,0,self.xy_size,self.xy_size)
+        ###### Check for negative obstacles ######
+        negative_obstacle_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](negative_obstacle_map, 0, self.xy_size, self.xy_size)
+        self.__make_negative_obstacle_map[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta,
+                                                                                    negative_obstacle_map,
+                                                                                    self.negative_obstacle_threshold, self.xy_size)
 
-        self.__make_positive_obstacle_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_index_map, self.height_map, self.xy_size, self.z_size, self.z_resolution, self.positive_obstacle_threshold,self.combined_hit_count,self.combined_total_count, self.robot_height, self.combined_origin,self.x_slope_map,self.y_slope_map,self.slope_obstacle_threshold, positive_obstacle_map)
+        ###### Make ground visibility map ######
+        visibility_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
+        self.__make_visibility_map[blockspergrid, self.threads_per_block_2D](visibility_map, self.height_map, self.xy_size)
 
-
-        # Check for negative obstacles. 
-        negative_obstacle_map = cuda.device_array([self.xy_size,self.xy_size],dtype=np.int32)
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](negative_obstacle_map,0,self.xy_size,self.xy_size)
-
-        self.__make_negative_obstacle_map[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta,negative_obstacle_map,self.negative_obstacle_threshold,self.xy_size)
-
-        # make ground visability map
-        visability_map = cuda.device_array([self.xy_size,self.xy_size],dtype=np.int32)
-
-        self.__make_visability_map[blockspergrid, self.threads_per_block_2D](visability_map,self.height_map,self.xy_size)
-
-
-        # format output data
-
-        combined_origin_world = self.combined_origin.copy_to_host()
-        combined_origin_world[0] = combined_origin_world[0] * self.xy_resolution
-        combined_origin_world[1] = combined_origin_world[1] * self.xy_resolution
-        combined_origin_world[2] = combined_origin_world[2] * self.z_resolution
-
-        #print("2d map rate = " + str(1.0 / (time.time() - map_start_time)))
-
-        # return all maps as cpu arrays
-        return (combined_origin_world, positive_obstacle_map.copy_to_host(),negative_obstacle_map.copy_to_host(),self.roughness_map.copy_to_host(),visability_map.copy_to_host() )
+        ###### Assemble return values #####
+        map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
+                            self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
+        return map_return_tuple
 
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
@@ -394,14 +396,14 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __make_visability_map(visability,height_map,xy_size):
+    def __make_visibility_map(visibility, height_map, xy_size):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
-        if(height_map[x,y] > - 1000):
-            visability[x,y] = 1.0
+        if height_map[x,y] > -1000:
+            visibility[x,y] = 1.0
         else:
-            visability[x,y] = 0.0
+            visibility[x,y] = 0.0
 
     @staticmethod
     @cuda.jit
