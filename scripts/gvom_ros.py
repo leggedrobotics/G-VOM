@@ -106,7 +106,7 @@ class VoxelMapper:
         tf_matrix = self.tf_transformer.fromTranslationRotation(translation,rotation)
         
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
-        self.voxel_mapper.Process_pointcloud(pc, odom_data, tf_matrix)
+        self.voxel_mapper.process_pointcloud(pc, odom_data, tf_matrix)
 
         # print("     pointcloud rate = " + str(1.0 / (time.time() - scan_time)))
 
