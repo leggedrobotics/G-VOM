@@ -104,6 +104,9 @@ class Gvom:
         self.ego_semaphore.release()
 
         point_count = pointcloud.shape[0]
+        if point_count == 0:
+            print(f"[WARNING] Processing an empty pointcloud, nothing will happen.")
+            return
         pointcloud = cuda.to_device(pointcloud)
 
         cell_count = cuda.to_device(np.zeros([1], dtype=np.int32))
@@ -142,6 +145,10 @@ class Gvom:
 
         ###### Make index map so we only need to store data on non-empty voxels ######
         cell_count_cpu = cell_count.copy_to_host()[0]
+        if cell_count_cpu == 0:
+            print(f"[WARNING] The pointcloud points don't overlap with any voxels. Nothing will happen!")
+            return
+        
         hit_count = cuda.device_array([cell_count_cpu], dtype=np.int32)
         total_count = cuda.device_array([cell_count_cpu], dtype=np.int32)
 
@@ -1032,54 +1039,36 @@ class Gvom:
         pass
 
     def __calculate_metrics_master(self, pointcloud, point_count, count, index_map, cell_count_cpu, origin):
-        # print("mean")
-        #self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Count
-
-        metric_blocks = self.blocks = math.ceil(self.xy_size*self.xy_size*self.z_size / self.threads_per_block)
+        metric_blocks = self.blocks = math.ceil(self.voxel_count / self.threads_per_block)
 
         blockspergrid_cell = math.ceil(cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_metric = math.ceil(metric_blocks / self.threads_per_block_2D[1])
         blockspergrid = (blockspergrid_cell, blockspergrid_metric)
 
         metrics = cuda.device_array([cell_count_cpu,self.metrics_count])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](metrics,0.0,cell_count_cpu,self.metrics_count)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](metrics, 0.0, cell_count_cpu, self.metrics_count)
 
-
-        #print("min height")
         min_height = cuda.device_array([cell_count_cpu*3], dtype=np.float32)
-        self.__init_1D_array[math.ceil(cell_count_cpu*3/self.threads_per_block),self.threads_per_block](min_height,1,cell_count_cpu*3)
+        self.__init_1D_array[math.ceil(cell_count_cpu*3/self.threads_per_block), self.threads_per_block](min_height, 1, cell_count_cpu*3)
 
-
-        #print("calc blocks")
-        calculate_blocks = ( int(np.ceil(point_count/self.threads_per_block)))
+        calculate_blocks = (int(np.ceil(point_count/self.threads_per_block)))
         
-        #print("calc mean")
+        normalize_blocks = (int(np.ceil(cell_count_cpu/self.threads_per_block_2D[0])), int(np.ceil(3/self.threads_per_block_2D[0])))
+        self.__calculate_mean[calculate_blocks, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size, self.z_size,
+                                                                        self.min_distance, index_map, pointcloud, metrics, point_count,
+                                                                        origin, self.xy_eigen_dist, self.z_eigen_dist)
+        self.__normalize_mean[normalize_blocks, self.threads_per_block_2D](metrics, cell_count_cpu)
         
-        self.__calculate_mean[calculate_blocks, self.threads_per_block](
-            self.xy_resolution, self.z_resolution, self.xy_size, self.z_size, self.min_distance, index_map, pointcloud, metrics, point_count, origin, self.xy_eigen_dist, self.z_eigen_dist)
-        
-        #print("norm")
-        normalize_blocks = ( int(np.ceil(cell_count_cpu/self.threads_per_block_2D[0])), int(np.ceil(3/self.threads_per_block_2D[0])) )
-
-        self.__normalize_mean[normalize_blocks,self.threads_per_block_2D](metrics,cell_count_cpu)
-        #print("other")
-        
-        
-        self.__calculate_covariance[calculate_blocks,self.threads_per_block](
-
-            self.xy_resolution, self.z_resolution, self.xy_size, self.z_size, self.min_distance, index_map, pointcloud, count, metrics, point_count, origin, self.xy_eigen_dist, self.z_eigen_dist
-            
-                )
-        
-        normalize_blocks = ( int(np.ceil(cell_count_cpu/self.threads_per_block_2D[0])), int(np.ceil(6/self.threads_per_block_2D[0])) )
-
-
+        normalize_blocks = (int(np.ceil(cell_count_cpu/self.threads_per_block_2D[0])), int(np.ceil(6/self.threads_per_block_2D[0])))
+        self.__calculate_covariance[calculate_blocks, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
+                                                                              self.z_size, self.min_distance, index_map, pointcloud,
+                                                                              count, metrics,point_count, origin, self.xy_eigen_dist,
+                                                                              self.z_eigen_dist)
         self.__normalize_covariance[normalize_blocks,self.threads_per_block_2D](metrics,cell_count_cpu)
 
-        self.__calculate_min_height[calculate_blocks, self.threads_per_block](
-            self.xy_resolution, self.z_resolution, self.xy_size, self.z_size, self.min_distance, index_map, pointcloud, min_height, point_count, origin)
-        
-        #print("return")
+        self.__calculate_min_height[calculate_blocks, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
+                                                                              self.z_size, self.min_distance, index_map, pointcloud,
+                                                                              min_height, point_count, origin)
 
         return metrics, min_height
 
@@ -1201,18 +1190,18 @@ class Gvom:
     @cuda.jit
     def __assign_indices(hit_count, miss_count, index_map, cell_count, voxel_count):
         i = cuda.grid(1)
-        if(i < voxel_count):
-            if(hit_count[i] > 0):
+        if i < voxel_count:
+            if hit_count[i] > 0:
                 index_map[i] = cuda.atomic.add(cell_count, 0, 1)
             else:
-                index_map[i] = - miss_count[i] - 1
+                index_map[i] = -miss_count[i] - 1
 
     @staticmethod
     @cuda.jit
     def __move_data(old, new, index_map, voxel_count):
         i = cuda.grid(1)
-        if(i < voxel_count):
-            if(index_map[i] >= 0):
+        if i < voxel_count:
+            if index_map[i] >= 0:
                 new[index_map[i]] = old[i]
 
     @staticmethod
@@ -1348,7 +1337,8 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __calculate_min_height(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, min_height, point_count, origin):
+    def __calculate_min_height(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, min_height, point_count,
+                               origin):
         i = cuda.grid(1)
         if i < point_count:
             d2 = points[i, 0]*points[i, 0] + points[i, 1] * points[i, 1] + points[i, 2]*points[i, 2]
