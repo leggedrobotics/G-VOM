@@ -1,9 +1,13 @@
 import numba
-from numba import vectorize, jit, cuda
+from numba import cuda, config
 import numpy as np
 import math
-import time
 import threading
+
+
+# Don't print warnings about GPU underutilization to keep the terminal clean
+config.CUDA_LOW_OCCUPANCY_WARNINGS = False
+
 
 class Gvom:
 
