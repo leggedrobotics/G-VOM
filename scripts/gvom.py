@@ -105,7 +105,7 @@ class Gvom:
 
         point_count = pointcloud.shape[0]
         if point_count == 0:
-            print(f"[WARNING] Processing an empty pointcloud, nothing will happen.")
+            print(f"[WARNING] Processing an empty pointcloud, nothing will happen!")
             return
         pointcloud = cuda.to_device(pointcloud)
 
@@ -146,9 +146,9 @@ class Gvom:
         ###### Make index map so we only need to store data on non-empty voxels ######
         cell_count_cpu = cell_count.copy_to_host()[0]
         if cell_count_cpu == 0:
-            print(f"[WARNING] The pointcloud points don't overlap with any voxels. Nothing will happen!")
+            print(f"[WARNING] The pointcloud points don't overlap with any voxels, nothing will happen!")
             return
-        
+
         hit_count = cuda.device_array([cell_count_cpu], dtype=np.int32)
         total_count = cuda.device_array([cell_count_cpu], dtype=np.int32)
 
@@ -177,7 +177,7 @@ class Gvom:
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
         if self.origin_buffer[self.last_buffer_index] is None:
-            print("ERROR: No data in buffer")
+            print("[WARNING] The map buffer is empty, nothing will happen!")
             return
 
         ###### Combine the lookup tables, calculate total number of occupied voxels ######
