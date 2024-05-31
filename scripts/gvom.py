@@ -341,7 +341,7 @@ class Gvom:
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
         lookup_table = self.last_combined_index_map.copy_to_host()
-        lookup_table = lookup_table.reshape((self.xy_size, self.xy_size, self.z_size))
+        lookup_table = lookup_table.reshape((self.xy_size, self.xy_size, self.z_size), order='F')
         occupancy_grid = lookup_table >= 0
         return occupancy_grid
 
