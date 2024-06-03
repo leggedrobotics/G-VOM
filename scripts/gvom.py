@@ -51,7 +51,7 @@ class Gvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
-        self.metrics = np.array([[3, 2]])
+        self.metrics = cuda.to_device(np.array([[3, 2]]))
 
         self.buffer_size = buffer_size
         self.buffer_index = 0
@@ -187,7 +187,7 @@ class Gvom:
         combined_origin_world[1] = combined_origin_world[1] * self.xy_resolution
         combined_origin_world[2] = combined_origin_world[2] * self.z_resolution
 
-        combined_cell_count = np.zeros([1], dtype=np.int64)
+        combined_cell_count = cuda.to_device(np.zeros([1], dtype=np.int64))
         self.combined_index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
         self.__init_1D_array[self.blocks,self.threads_per_block](self.combined_index_map, -1, self.voxel_count)
 
@@ -242,7 +242,7 @@ class Gvom:
                 self.semaphores[i].release()
                 continue
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
-                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
                                                                              self.metrics_buffer[i], self.hit_count_buffer[i],
                                                                              self.total_count_buffer[i], self.min_height_buffer[i],
@@ -254,7 +254,7 @@ class Gvom:
         if not (self.last_combined_origin is None):
             # If previous merged map exists, combine it too
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
-                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
                                                                              self.last_combined_metrics,
                                                                              self.last_combined_hit_count,
@@ -292,8 +292,9 @@ class Gvom:
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.inferred_height_map, -1000.0, self.xy_size, self.xy_size)
 
         self.ego_semaphore.acquire()
+        ego_position_cuda = cuda.to_device(self.ego_position)
         self.__make_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution,self.ego_position,self.robot_radius,self.ground_to_lidar_height, self.height_map)
+            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution, ego_position_cuda, self.robot_radius, self.ground_to_lidar_height, self.height_map)
         self.ego_semaphore.release()
 
         self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
@@ -301,13 +302,13 @@ class Gvom:
 
         ###### Estimate ground slope ######
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map,-1.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map, -1.0, self.xy_size, self.xy_size)
 
         self.x_slope_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.x_slope_map,0.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.x_slope_map, 0.0, self.xy_size, self.xy_size)
 
         self.y_slope_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.y_slope_map,0.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.y_slope_map, 0.0, self.xy_size, self.xy_size)
 
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
