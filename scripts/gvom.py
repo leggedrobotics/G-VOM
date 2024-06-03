@@ -231,8 +231,14 @@ class Gvom:
         if self.origin_buffer[self.last_buffer_index] is None:
             print("[WARNING] The map buffer is empty, nothing will happen!")
             return
+        
+        total_execution_time = 0.0
 
         ###### Combine the lookup tables, calculate total number of occupied voxels ######
+        comb_lookup_start_event = cuda.event()
+        comb_lookup_end_event = cuda.event()
+        comb_lookup_start_event.record()
+
         self.combined_origin = cuda.to_device(self.origin_buffer[self.last_buffer_index].copy_to_host())
         combined_origin_world = self.combined_origin.copy_to_host()
         combined_origin_world[0] = combined_origin_world[0] * self.xy_resolution
@@ -268,7 +274,16 @@ class Gvom:
                                                                                  self.z_size)
         self.combined_cell_count_cpu = combined_cell_count[0]
 
+        comb_lookup_end_event.record()
+        comb_lookup_end_event.synchronize()
+        comb_lookup_time = cuda.event_elapsed_time(comb_lookup_start_event, comb_lookup_end_event)
+        total_execution_time += comb_lookup_time
+
         ###### Combine the data ######
+        comb_data_start_event = cuda.event()
+        comb_data_end_event = cuda.event()
+        comb_data_start_event.record()
+
         blockspergrid_cell = math.ceil(self.combined_cell_count_cpu/self.threads_per_block)
         self.combined_hit_count = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
         self.__init_1D_array[blockspergrid_cell,self.threads_per_block](self.combined_hit_count, 0, self.combined_cell_count_cpu)
@@ -325,7 +340,16 @@ class Gvom:
         self.last_combined_min_height = self.combined_min_height
         self.last_combined_origin = self.combined_origin
 
+        comb_data_end_event.record()
+        comb_data_end_event.synchronize()
+        comb_data_time = cuda.event_elapsed_time(comb_data_start_event, comb_data_end_event)
+        total_execution_time += comb_data_time
+
         ###### Calculate eigenvalues for each voxel ######
+        eigen_start_event = cuda.event()
+        eigen_end_event = cuda.event()
+        eigen_start_event.record()
+
         blockspergrid_cell_2D = math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_eigenvalue_2D = math.ceil(3 / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_eigenvalue_2D)
@@ -334,9 +358,18 @@ class Gvom:
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.voxels_eigenvalues, 0, self.combined_cell_count_cpu, 3)
         self.__calculate_eigenvalues[blockspergrid_cell, self.threads_per_block](self.voxels_eigenvalues, self.combined_metrics,
                                                                                  self.combined_cell_count_cpu)
+        
+        eigen_end_event.record()
+        eigen_end_event.synchronize()
+        eigen_time = cuda.event_elapsed_time(eigen_start_event, eigen_end_event)
+        total_execution_time += eigen_time
 
         # Make 2d maps from combined map
         ###### Create a height map ######
+        height_map_start_event = cuda.event()
+        height_map_end_event = cuda.event()
+        height_map_start_event.record()
+
         self.height_map = cuda.device_array([self.xy_size, self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.height_map, -1000.0, self.xy_size, self.xy_size)
 
@@ -350,8 +383,17 @@ class Gvom:
 
         self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
             self.combined_origin, self.combined_index_map, self.xy_size, self.z_size, self.z_resolution, self.inferred_height_map)
+        
+        height_map_end_event.record()
+        height_map_end_event.synchronize()
+        height_map_time = cuda.event_elapsed_time(height_map_start_event, height_map_end_event)
+        total_execution_time += height_map_time
 
         ###### Estimate ground slope ######
+        slope_start_event = cuda.event()
+        slope_end_event = cuda.event()
+        slope_start_event.record()
+
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map,-1.0,self.xy_size,self.xy_size)
 
@@ -363,17 +405,35 @@ class Gvom:
 
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
+        
+        slope_end_event.record()
+        slope_end_event.synchronize()
+        slope_time = cuda.event_elapsed_time(slope_start_event, slope_end_event)
+        total_execution_time += slope_time
 
         ###### Guess the height in unobserved cells ######
+        guess_start_event = cuda.event()
+        guess_end_event = cuda.event()
+        guess_start_event.record()
+
         self.guessed_height_delta = cuda.device_array([self.xy_size, self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta, 0.0, self.xy_size, self.xy_size)
         self.__guess_height[blockspergrid, self.threads_per_block_2D](self.height_map, self.inferred_height_map, self.xy_size,
                                                                       self.xy_resolution, self.x_slope_map, self.y_slope_map,
                                                                       self.guessed_height_delta)
+        
+        guess_end_event.record()
+        guess_end_event.synchronize()
+        guess_time = cuda.event_elapsed_time(guess_start_event, guess_end_event)
+        total_execution_time += guess_time
 
         ###### Check for positive obstacles ######
         # Any cell where the max height is more than "threshold" above the height map and less than "threshold + robot height" is
         # marked as an obstacle. Obstacle type can be determined from cell metrics.
+        positive_start_event = cuda.event()
+        positive_end_event = cuda.event()
+        positive_start_event.record()
+
         positive_obstacle_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](positive_obstacle_map, 0, self.xy_size, self.xy_size)
         self.__make_positive_obstacle_map[blockspergrid, self.threads_per_block_2D](self.combined_index_map, self.height_map,
@@ -384,22 +444,47 @@ class Gvom:
                                                                                     self.combined_origin,self.x_slope_map,
                                                                                     self.y_slope_map,self.slope_obstacle_threshold,
                                                                                     positive_obstacle_map)
+        
+        positive_end_event.record()
+        positive_end_event.synchronize()
+        positive_time = cuda.event_elapsed_time(positive_start_event, positive_end_event)
+        total_execution_time += positive_time
 
         ###### Check for negative obstacles ######
+        negative_start_event = cuda.event()
+        negative_end_event = cuda.event()
+        negative_start_event.record()
+
         negative_obstacle_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](negative_obstacle_map, 0, self.xy_size, self.xy_size)
         self.__make_negative_obstacle_map[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta,
                                                                                     negative_obstacle_map,
                                                                                     self.negative_obstacle_threshold, self.xy_size)
+        
+        negative_end_event.record()
+        negative_end_event.synchronize()
+        negative_time = cuda.event_elapsed_time(negative_start_event, negative_end_event)
+        total_execution_time += negative_time
 
         ###### Make ground visibility map ######
+        visibility_start_event = cuda.event()
+        visibility_end_event = cuda.event()
+        visibility_start_event.record()
+
         visibility_map = cuda.device_array([self.xy_size, self.xy_size], dtype=np.int32)
         self.__make_visibility_map[blockspergrid, self.threads_per_block_2D](visibility_map, self.height_map, self.xy_size)
+
+        visibility_end_event.record()
+        visibility_end_event.synchronize()
+        visibility_time = cuda.event_elapsed_time(visibility_start_event, visibility_end_event)
+        total_execution_time += visibility_time
 
         ###### Assemble return values #####
         map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
-        return map_return_tuple
+        times_return_tuple = (comb_lookup_time, comb_data_time, eigen_time, height_map_time,
+                              slope_time, guess_time, positive_time, negative_time, visibility_time, total_execution_time)
+        return map_return_tuple, times_return_tuple
 
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
