@@ -99,6 +99,10 @@ class Gvom:
     def process_pointcloud(self, pointcloud, ego_position, transform=None):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
+        initialization_start_event = cuda.event()
+        initialization_end_event = cuda.event()
+        initialization_start_event.record()
+
         self.ego_semaphore.acquire()
         self.ego_position = ego_position
         self.ego_semaphore.release()
@@ -130,20 +134,44 @@ class Gvom:
         blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
         blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
 
+        initialization_end_event.record()
+        initialization_end_event.synchronize()
+        initialization_time = cuda.event_elapsed_time(initialization_start_event, initialization_end_event)
+
         ###### Transform pointcloud ######
         if not transform is None:
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, transform, point_count)
 
         ###### Count points in each voxel and number of rays through each voxel ######
+        raytracing_event_start = cuda.event()
+        raytracing_event_end = cuda.event()
+        raytracing_event_start.record()
+
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
                                                                       tmp_total_count, point_count, ego_position, origin)
+        
+        raytracing_event_end.record()
+        raytracing_event_end.synchronize()
+        raytracing_time = cuda.event_elapsed_time(raytracing_event_start, raytracing_event_end)
 
         ###### Populate the lookup table with the correct indexes ######
+        index_calculation_event_start = cuda.event()
+        index_calculation_event_end = cuda.event()
+        index_calculation_event_start.record()
+
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
                                                                   self.voxel_count)
+        
+        index_calculation_event_end.record()
+        index_calculation_event_end.synchronize()
+        index_calculation_time = cuda.event_elapsed_time(index_calculation_event_start, index_calculation_event_end)
 
         ###### Make index map so we only need to store data on non-empty voxels ######
+        memory_smallification_event_start = cuda.event()
+        memory_smallification_event_end = cuda.event()
+        memory_smallification_event_start.record()
+
         cell_count_cpu = cell_count.copy_to_host()[0]
         if cell_count_cpu == 0:
             print(f"[WARNING] The pointcloud points don't overlap with any voxels, nothing will happen!")
@@ -155,24 +183,48 @@ class Gvom:
         self.__move_data[blocks_map, self.threads_per_block](tmp_hit_count, hit_count, index_map, self.voxel_count)
         self.__move_data[blocks_map, self.threads_per_block](tmp_total_count, total_count, index_map, self.voxel_count)
 
+        memory_smallification_event_end.record()
+        memory_smallification_event_end.synchronize()
+        smallification_time = cuda.event_elapsed_time(memory_smallification_event_start, memory_smallification_event_end)
+
         ###### Calculate metrics ######
+        metrics_event_start = cuda.event()
+        metrics_event_end = cuda.event()
+        metrics_event_start.record()
+
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
                                                               origin)
 
+        metrics_event_end.record()
+        metrics_event_end.synchronize()
+        metrics_time = cuda.event_elapsed_time(metrics_event_start, metrics_event_end)
+
         ###### Assign data to buffer ######
-        self.semaphores[self.buffer_index].acquire()            # Block the main thread from accessing this buffer index
+        buffer_event_start = cuda.event()
+        buffer_event_end = cuda.event()
+        buffer_event_start.record()
+
+        # Block the main thread from accessing this buffer index
+        self.semaphores[self.buffer_index].acquire()
         self.index_buffer[self.buffer_index] = index_map
         self.hit_count_buffer[self.buffer_index] = hit_count
         self.total_count_buffer[self.buffer_index] = total_count
         self.metrics_buffer[self.buffer_index] = metrics
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
-        self.semaphores[self.buffer_index].release()            # Release this buffer index
+        # Release this buffer index
+        self.semaphores[self.buffer_index].release()
 
         self.last_buffer_index = self.buffer_index
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
+
+        buffer_event_end.record()
+        buffer_event_end.synchronize()
+        buffer_time = cuda.event_elapsed_time(buffer_event_start, buffer_event_end)
+
+        return initialization_time, raytracing_time, index_calculation_time,  smallification_time, metrics_time, buffer_time
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
