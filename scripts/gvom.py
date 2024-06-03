@@ -51,7 +51,7 @@ class Gvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
-        self.metrics = np.array([[3, 2]])
+        self.metrics = cuda.to_device(np.array([[3, 2]]))
 
         self.buffer_size = buffer_size
         self.buffer_index = 0
@@ -242,7 +242,7 @@ class Gvom:
                 self.semaphores[i].release()
                 continue
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
-                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
                                                                              self.metrics_buffer[i], self.hit_count_buffer[i],
                                                                              self.total_count_buffer[i], self.min_height_buffer[i],
@@ -254,7 +254,7 @@ class Gvom:
         if not (self.last_combined_origin is None):
             # If previous merged map exists, combine it too
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
-                                                                             self.combined_total_count,self.combined_min_height,
+                                                                             self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
                                                                              self.last_combined_metrics,
                                                                              self.last_combined_hit_count,
