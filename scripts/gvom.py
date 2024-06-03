@@ -292,8 +292,9 @@ class Gvom:
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.inferred_height_map, -1000.0, self.xy_size, self.xy_size)
 
         self.ego_semaphore.acquire()
+        ego_position_cuda = cuda.to_device(self.ego_position)
         self.__make_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution,self.ego_position,self.robot_radius,self.ground_to_lidar_height, self.height_map)
+            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution, ego_position_cuda, self.robot_radius, self.ground_to_lidar_height, self.height_map)
         self.ego_semaphore.release()
 
         self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
@@ -301,13 +302,13 @@ class Gvom:
 
         ###### Estimate ground slope ######
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map,-1.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.roughness_map, -1.0, self.xy_size, self.xy_size)
 
         self.x_slope_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.x_slope_map,0.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.x_slope_map, 0.0, self.xy_size, self.xy_size)
 
         self.y_slope_map = cuda.device_array([self.xy_size,self.xy_size])
-        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.y_slope_map,0.0,self.xy_size,self.xy_size)
+        self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.y_slope_map, 0.0, self.xy_size, self.xy_size)
 
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
