@@ -187,7 +187,7 @@ class Gvom:
         combined_origin_world[1] = combined_origin_world[1] * self.xy_resolution
         combined_origin_world[2] = combined_origin_world[2] * self.z_resolution
 
-        combined_cell_count = np.zeros([1], dtype=np.int64)
+        combined_cell_count = cuda.to_device(np.zeros([1], dtype=np.int64))
         self.combined_index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
         self.__init_1D_array[self.blocks,self.threads_per_block](self.combined_index_map, -1, self.voxel_count)
 
