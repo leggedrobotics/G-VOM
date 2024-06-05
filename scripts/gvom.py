@@ -485,45 +485,38 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __make_positive_obstacle_map(combined_index_map, height_map, xy_size, z_size, z_resolution, positive_obstacle_threshold,hit_count,total_count, robot_height, origin,x_slope,y_slope,slope_threshold,  obstacle_map):
+    def __make_positive_obstacle_map(combined_index_map, height_map, xy_size, z_size, z_resolution, positive_obstacle_threshold, hit_count,
+                                     total_count, robot_height, origin, x_slope, y_slope, slope_threshold, obstacle_map):
         """
         Obstacle map reports the average density of occpied voxels within the obstacle range
         """
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
 
-        if(math.sqrt(x_slope[x,y] * x_slope[x,y] + y_slope[x,y] * y_slope[x,y]) >= slope_threshold):
+        if math.sqrt(x_slope[x, y]*x_slope[x, y] + y_slope[x, y]*y_slope[x, y]) >= slope_threshold:
             obstacle_map[x,y] = 100
             return
 
-
-        min_obs_height = height_map[x,y] + positive_obstacle_threshold
-        max_obs_height = height_map[x,y] + robot_height
-
+        min_obs_height = height_map[x, y] + positive_obstacle_threshold
         min_height_index = int(math.floor((min_obs_height/z_resolution) - origin[2])) + 1
+        max_obs_height = height_map[x, y] + robot_height
         max_height_index = int(math.floor((max_obs_height/z_resolution) - origin[2]))
-
         if not (min_height_index >= 0 and min_height_index < z_size):
             return
-        
         if not (max_height_index >= 0 and max_height_index < z_size):
             return
 
         density = 0.0
         n = 0.0
-        for z in range(min_height_index,max_height_index+1):
-            index = int(combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)])
-            
-            if(index >= 0):
-                if(hit_count[index] > 10):
-                    n += float(total_count[index])
-                    density += float(hit_count[index])
-
+        for z in range(min_height_index, max_height_index+1):
+            index = int(combined_index_map[int(x + y*xy_size + z*xy_size*xy_size)])
+            if index >= 0 and hit_count[index] > 10:
+                n += float(total_count[index])
+                density += float(hit_count[index])
         
-        if(n>0.0):
+        if n > 0.0:
             density /= n
-
         obstacle_map[x, y] = int(density * 100)
 
     @staticmethod
