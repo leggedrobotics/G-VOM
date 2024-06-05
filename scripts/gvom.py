@@ -293,12 +293,15 @@ class Gvom:
 
         self.ego_semaphore.acquire()
         ego_position_cuda = cuda.to_device(self.ego_position)
-        self.__make_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution, ego_position_cuda, self.robot_radius, self.ground_to_lidar_height, self.height_map)
+        self.__make_height_map[blockspergrid, self.threads_per_block_2D](self.combined_origin, self.combined_index_map,
+                                                                         self.combined_min_height, self.xy_size, self.z_size,
+                                                                         self.xy_resolution, self.z_resolution, ego_position_cuda,
+                                                                         self.robot_radius, self.ground_to_lidar_height, self.height_map)
         self.ego_semaphore.release()
 
-        self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.xy_size, self.z_size, self.z_resolution, self.inferred_height_map)
+        self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](self.combined_origin, self.combined_index_map,
+                                                                                  self.xy_size, self.z_size, self.z_resolution,
+                                                                                  self.inferred_height_map)
 
         ###### Estimate ground slope ######
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
@@ -313,7 +316,7 @@ class Gvom:
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
 
-        ###### Guess the height in unobserved cells ######
+        ###### Guess the height uncertainty in cells with inferred height ######
         self.guessed_height_delta = cuda.device_array([self.xy_size, self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta, 0.0, self.xy_size, self.xy_size)
         self.__guess_height[blockspergrid, self.threads_per_block_2D](self.height_map, self.inferred_height_map, self.xy_size,
@@ -330,8 +333,8 @@ class Gvom:
                                                                                     self.positive_obstacle_threshold,
                                                                                     self.combined_hit_count,
                                                                                     self.combined_total_count, self.robot_height,
-                                                                                    self.combined_origin,self.x_slope_map,
-                                                                                    self.y_slope_map,self.slope_obstacle_threshold,
+                                                                                    self.combined_origin, self.x_slope_map,
+                                                                                    self.y_slope_map, self.slope_obstacle_threshold,
                                                                                     positive_obstacle_map)
 
         ###### Check for negative obstacles ######
