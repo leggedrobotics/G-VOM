@@ -682,31 +682,28 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __calculate_slope(height_map,xy_size,xy_resolution,output_slope_map_x,output_slope_map_y, output_roughness_map):
+    def __calculate_slope(height_map, xy_size, xy_resolution, output_slope_map_x, output_slope_map_y, output_roughness_map):
         x0, y0 = cuda.grid(2)
-        if(x0 >= xy_size or y0 >= xy_size):
+        if x0 >= xy_size or y0 >= xy_size:
             return
 
         n_good_pts = 0
-
         radius = 1
         for x in range(max(0,x0 - radius), min(xy_size, x0 + radius + 1)):
             for y in range(max(0,y0 - radius), min(xy_size, y0 + radius + 1)):
-                if( height_map[x,y] > -1000 ):
+                if height_map[x,y] > -1000:
                     n_good_pts += 1
-        
-        if(n_good_pts <3):
+        if n_good_pts < 3:
             return
 
-        pts = numba.cuda.local.array((3,9),np.float64)
-        
+        pts = numba.cuda.local.array((3, 9), np.float64)
         i=0
         mean_x = 0.0
         mean_y = 0.0
         mean_z = 0.0
         for x in range(max(0,x0 - radius), min(xy_size, x0 + radius + 1)):
             for y in range(max(0,y0 - radius), min(xy_size, y0 + radius + 1)):
-                if( height_map[x,y] > -1000 ):
+                if height_map[x,y] > -1000:
                     pts[0,i] = x * xy_resolution
                     pts[1,i] = y * xy_resolution
                     pts[2,i] = height_map[x,y]
@@ -714,9 +711,7 @@ class Gvom:
                     mean_x += pts[0,i]
                     mean_y += pts[1,i]
                     mean_z += pts[2,i]
-
                     i+=1
-        
         mean_x /= float(i)
         mean_y /= float(i)
         mean_z /= float(i)
@@ -726,7 +721,7 @@ class Gvom:
         xz=0.0
         yy=0.0
         yz=0.0  
-        for i in range(0,n_good_pts):
+        for i in range(0, n_good_pts):
             xx += (pts[0,i] - mean_x)*(pts[0,i] - mean_x)
             xy += (pts[0,i] - mean_x)*(pts[1,i] - mean_y)
             xz += (pts[0,i] - mean_x)*(pts[2,i] - mean_z)
@@ -734,42 +729,29 @@ class Gvom:
             yz += (pts[1,i] - mean_y)*(pts[2,i] - mean_z)
 
         det = xx*yy - xy*xy
-        if(det == 0.0):
+        if det == 0.0:
             return
 
         a0 = (yy*xz - xy*yz) / det
         a1 = (xx*yz - xy*xz) / det
+        m = math.sqrt(a0*a0 + a1*a1 + 1)
+        a0 /= m
+        a1 /= m
 
         error = 0.0
-
-        # A*x + B*y + C*z = D 
-        # n = [A,B,C]
-        # z = a0 * x + a1 * y
-        # 0 = a0 * x + a1 * y - z
-        # D = 0, A = a0, B = a1, C = -1
-        # n = [-a0,-a1,1]
-        # theta_ = atan2(1,-a0)
-
-        m = math.sqrt(a0*a0 + a1*a1 + 1)
-        a0/=m
-        a1/=m
-
         for i in range(0,n_good_pts):
             e = (pts[2,i] - mean_z) - (a0 * (pts[0,i] - mean_x) + a1 * (pts[1,i] - mean_y))
             error += e*e
-
+        
         error /= float(n_good_pts)
-        if(error >0):
+        if error > 0:
             error = math.log(error)
         output_roughness_map[x0,y0] = error
 
-        x_angle = math.atan2(a0,1.0/m)
-        y_angle = math.atan2(a1,1.0/m)
-
-        output_slope_map_x[x0,y0] = x_angle
-        output_slope_map_y[x0,y0] = y_angle
-
-        pass
+        x_angle = math.atan2(a0, 1.0/m)
+        y_angle = math.atan2(a1, 1.0/m)
+        output_slope_map_x[x0, y0] = x_angle
+        output_slope_map_y[x0, y0] = y_angle
 
     @staticmethod
     @cuda.jit
