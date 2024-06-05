@@ -415,10 +415,11 @@ class Gvom:
         x, y = cuda.grid(2)
         if x >= xy_size or y >= xy_size:
             return
-        if height_map[x,y] > -1000:
-            visibility[x,y] = 1.0
+        
+        if height_map[x, y] > -1000:
+            visibility[x, y] = 1.0
         else:
-            visibility[x,y] = 0.0
+            visibility[x, y] = 0.0
 
     @staticmethod
     @cuda.jit
