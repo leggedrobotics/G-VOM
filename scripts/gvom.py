@@ -525,33 +525,33 @@ class Gvom:
 
     @staticmethod
     @cuda.jit                   
-    def __make_height_map(combined_origin, combined_index_map, min_height, xy_size, z_size,xy_resolution, z_resolution,ego_position,radius,ground_to_lidar_height, output_height_map):
+    def __make_height_map(combined_origin, combined_index_map, min_height, xy_size, z_size,xy_resolution, z_resolution, ego_position,radius,
+                          ground_to_lidar_height, output_height_map):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
         
-        xp = (((combined_origin[0] + x) * xy_resolution)  - ego_position[0])
-        yp = (((combined_origin[1] + y) * xy_resolution) - ego_position[1])
-
-        if(xp*xp + yp*yp <= radius*radius):
+        xp = ((combined_origin[0] + x) * xy_resolution)  - ego_position[0]
+        yp = ((combined_origin[1] + y) * xy_resolution) - ego_position[1]
+        if xp*xp + yp*yp <= radius*radius:
             output_height_map[x, y] = ego_position[2] - ground_to_lidar_height
 
         for z in range(z_size):
             index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
-            if(index >= 0):
-                output_height_map[x, y] = ( min_height[index] + z + combined_origin[2]) * z_resolution
+            if index >= 0:
+                output_height_map[x, y] = (min_height[index] + z + combined_origin[2]) * z_resolution
                 return
 
     @staticmethod
     @cuda.jit
     def __make_inferred_height_map(combined_origin, combined_index_map, xy_size, z_size, z_resolution, output_inferred_height_map):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
 
         for z in range(z_size):
             index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
-            if(index < -1):
+            if index < -1:
                 inferred_height = (z + combined_origin[2]) * z_resolution
                 output_inferred_height_map[x, y] = inferred_height
                 return
