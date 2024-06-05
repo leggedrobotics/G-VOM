@@ -293,12 +293,15 @@ class Gvom:
 
         self.ego_semaphore.acquire()
         ego_position_cuda = cuda.to_device(self.ego_position)
-        self.__make_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.combined_min_height, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution, ego_position_cuda, self.robot_radius, self.ground_to_lidar_height, self.height_map)
+        self.__make_height_map[blockspergrid, self.threads_per_block_2D](self.combined_origin, self.combined_index_map,
+                                                                         self.combined_min_height, self.xy_size, self.z_size,
+                                                                         self.xy_resolution, self.z_resolution, ego_position_cuda,
+                                                                         self.robot_radius, self.ground_to_lidar_height, self.height_map)
         self.ego_semaphore.release()
 
-        self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](
-            self.combined_origin, self.combined_index_map, self.xy_size, self.z_size, self.z_resolution, self.inferred_height_map)
+        self.__make_inferred_height_map[blockspergrid, self.threads_per_block_2D](self.combined_origin, self.combined_index_map,
+                                                                                  self.xy_size, self.z_size, self.z_resolution,
+                                                                                  self.inferred_height_map)
 
         ###### Estimate ground slope ######
         self.roughness_map = cuda.device_array([self.xy_size,self.xy_size])
@@ -313,7 +316,7 @@ class Gvom:
         self.__calculate_slope[blockspergrid, self.threads_per_block_2D](
             self.height_map, self.xy_size, self.xy_resolution, self.x_slope_map, self.y_slope_map, self.roughness_map)
 
-        ###### Guess the height in unobserved cells ######
+        ###### Guess the height uncertainty in cells with inferred height ######
         self.guessed_height_delta = cuda.device_array([self.xy_size, self.xy_size])
         self.__init_2D_array[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta, 0.0, self.xy_size, self.xy_size)
         self.__guess_height[blockspergrid, self.threads_per_block_2D](self.height_map, self.inferred_height_map, self.xy_size,
@@ -330,8 +333,8 @@ class Gvom:
                                                                                     self.positive_obstacle_threshold,
                                                                                     self.combined_hit_count,
                                                                                     self.combined_total_count, self.robot_height,
-                                                                                    self.combined_origin,self.x_slope_map,
-                                                                                    self.y_slope_map,self.slope_obstacle_threshold,
+                                                                                    self.combined_origin, self.x_slope_map,
+                                                                                    self.y_slope_map, self.slope_obstacle_threshold,
                                                                                     positive_obstacle_map)
 
         ###### Check for negative obstacles ######
@@ -412,10 +415,11 @@ class Gvom:
         x, y = cuda.grid(2)
         if x >= xy_size or y >= xy_size:
             return
-        if height_map[x,y] > -1000:
-            visibility[x,y] = 1.0
+        
+        if height_map[x, y] > -1000:
+            visibility[x, y] = 1.0
         else:
-            visibility[x,y] = 0.0
+            visibility[x, y] = 0.0
 
     @staticmethod
     @cuda.jit
@@ -472,106 +476,97 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __make_negative_obstacle_map(guessed_height_delta,negative_obstacle_map,negative_obstacle_threshold,xy_size):
+    def __make_negative_obstacle_map(guessed_height_delta, negative_obstacle_map, negative_obstacle_threshold, xy_size):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
-
-        if(guessed_height_delta[x,y] > negative_obstacle_threshold):
-            negative_obstacle_map[x,y] = 100
+        
+        if guessed_height_delta[x, y] > negative_obstacle_threshold:
+            negative_obstacle_map[x, y] = 100
 
     @staticmethod
     @cuda.jit
-    def __make_positive_obstacle_map(combined_index_map, height_map, xy_size, z_size, z_resolution, positive_obstacle_threshold,hit_count,total_count, robot_height, origin,x_slope,y_slope,slope_threshold,  obstacle_map):
+    def __make_positive_obstacle_map(combined_index_map, height_map, xy_size, z_size, z_resolution, positive_obstacle_threshold, hit_count,
+                                     total_count, robot_height, origin, x_slope, y_slope, slope_threshold, obstacle_map):
         """
         Obstacle map reports the average density of occpied voxels within the obstacle range
         """
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
 
-        if(math.sqrt(x_slope[x,y] * x_slope[x,y] + y_slope[x,y] * y_slope[x,y]) >= slope_threshold):
+        if math.sqrt(x_slope[x, y]*x_slope[x, y] + y_slope[x, y]*y_slope[x, y]) >= slope_threshold:
             obstacle_map[x,y] = 100
             return
 
-
-        min_obs_height = height_map[x,y] + positive_obstacle_threshold
-        max_obs_height = height_map[x,y] + robot_height
-
+        min_obs_height = height_map[x, y] + positive_obstacle_threshold
         min_height_index = int(math.floor((min_obs_height/z_resolution) - origin[2])) + 1
+        max_obs_height = height_map[x, y] + robot_height
         max_height_index = int(math.floor((max_obs_height/z_resolution) - origin[2]))
-
         if not (min_height_index >= 0 and min_height_index < z_size):
             return
-        
         if not (max_height_index >= 0 and max_height_index < z_size):
             return
 
         density = 0.0
         n = 0.0
-        for z in range(min_height_index,max_height_index+1):
-            index = int(combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)])
-            
-            if(index >= 0):
-                if(hit_count[index] > 10):
-                    n += float(total_count[index])
-                    density += float(hit_count[index])
-
+        for z in range(min_height_index, max_height_index+1):
+            index = int(combined_index_map[int(x + y*xy_size + z*xy_size*xy_size)])
+            if index >= 0 and hit_count[index] > 10:
+                n += float(total_count[index])
+                density += float(hit_count[index])
         
-        if(n>0.0):
+        if n > 0.0:
             density /= n
-
         obstacle_map[x, y] = int(density * 100)
 
     @staticmethod
     @cuda.jit                   
-    def __make_height_map(combined_origin, combined_index_map, min_height, xy_size, z_size,xy_resolution, z_resolution,ego_position,radius,ground_to_lidar_height, output_height_map):
+    def __make_height_map(combined_origin, combined_index_map, min_height, xy_size, z_size,xy_resolution, z_resolution, ego_position,radius,
+                          ground_to_lidar_height, output_height_map):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
         
-        xp = (((combined_origin[0] + x) * xy_resolution)  - ego_position[0])
-        yp = (((combined_origin[1] + y) * xy_resolution) - ego_position[1])
-
-        if(xp*xp + yp*yp <= radius*radius):
+        xp = ((combined_origin[0] + x) * xy_resolution)  - ego_position[0]
+        yp = ((combined_origin[1] + y) * xy_resolution) - ego_position[1]
+        if xp*xp + yp*yp <= radius*radius:
             output_height_map[x, y] = ego_position[2] - ground_to_lidar_height
 
         for z in range(z_size):
             index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
-            if(index >= 0):
-                output_height_map[x, y] = ( min_height[index] + z + combined_origin[2]) * z_resolution
+            if index >= 0:
+                output_height_map[x, y] = (min_height[index] + z + combined_origin[2]) * z_resolution
                 return
 
     @staticmethod
     @cuda.jit
     def __make_inferred_height_map(combined_origin, combined_index_map, xy_size, z_size, z_resolution, output_inferred_height_map):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
 
         for z in range(z_size):
             index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
-            if(index < -1):
+            if index < -1:
                 inferred_height = (z + combined_origin[2]) * z_resolution
                 output_inferred_height_map[x, y] = inferred_height
                 return
 
     @staticmethod
     @cuda.jit
-    def __guess_height(height_map,inferred_height_map,xy_size,xy_resolution,slope_map_x,slope_map_y,output_guessed_height_delta):
+    def __guess_height(height_map, inferred_height_map, xy_size, xy_resolution, slope_map_x, slope_map_y, output_guessed_height_delta):
         x0, y0 = cuda.grid(2)
-        if(x0 >= xy_size or y0 >= xy_size):
+        if x0 >= xy_size or y0 >= xy_size:
             return
-        if( height_map[x0,y0] > -1000 ):
-            return
-        if(inferred_height_map[x0,y0] == -1000.0):
+
+        if height_map[x0,y0] > -1000 or inferred_height_map[x0,y0] == -1000.0:
             return
 
         x_p_done = False
         x_n_done = False
         y_p_done = False
         y_n_done = False
-
 
         x_p = x0
         x_ph = -1000
@@ -582,131 +577,113 @@ class Gvom:
         y_n = y0
         y_nh = -1000
 
-
         i = 0
-        while (i < 15 ) and (not (x_n_done and x_n_done and y_p_done and y_n_done)): 
-
+        while i < 15 and not (x_n_done and x_n_done and y_p_done and y_n_done): 
             x_p += 1
             x_n -= 1
             y_p += 1
             y_n -= 1
-
             i += 1
 
             if not x_p_done:
-                if(x_p < xy_size):
-
-                    for dy in range(-i,i):
-                        if(y0 + dy >= xy_size or y0+dy <0):
+                if x_p < xy_size:
+                    for dy in range(-i, i):
+                        if y0+dy >= xy_size or y0+dy < 0:
                             continue
 
-                        if( height_map[x_p,y0 + dy] > -1000 ):
-                        
-                            x_ph = height_map[x_p,y0 + dy]
+                        if height_map[x_p, y0+dy] > -1000:
+                            x_ph = height_map[x_p, y0+dy]
                             x_p_done = True
                             break
                 else:
                     x_p_done = True
 
             if not x_n_done:
-                if(x_n >= 0):
-
-                    for dy in range(-i + 1 ,i + 1):
-                        if(y0 + dy >= xy_size or y0+dy <0):
+                if x_n >= 0:
+                    for dy in range(-i+1, i+1):
+                        if y0+dy >= xy_size or y0+dy < 0:
                             continue
 
-                        if( height_map[x_n,y0 + dy] > -1000 ):
-                        
-                            x_nh = height_map[x_n,y0 + dy]
+                        if height_map[x_n, y0+dy] > -1000:
+                            x_nh = height_map[x_n, y0+dy]
                             x_n_done = True
                             break
                 else:
                     x_n_done = True
             
             if not y_p_done:
-                if(y_p < xy_size):
-
-                    for dx in range(-i+1,i+1):
-                        if(x0 + dx >= xy_size or x0+dx <0):
+                if y_p < xy_size:
+                    for dx in range(-i+1, i+1):
+                        if x0+dx >= xy_size or x0+dx < 0:
                             continue
 
-                        if( height_map[x0+dx,y_p] > -1000 ):
-                        
-                            y_ph = height_map[x0+dx,y_p]
+                        if height_map[x0+dx, y_p] > -1000:
+                            y_ph = height_map[x0+dx, y_p]
                             y_p_done = True
                             break
                 else:
                     y_p_done = True
             
             if not y_n_done:
-                if(y_n >= 0):
-
-                    for dx in range(-i ,i ):
-                        if(x0 + dx >= xy_size or x0+dx <0):
+                if y_n >= 0:
+                    for dx in range(-i, i):
+                        if x0+dx >= xy_size or x0+dx < 0:
                             continue
 
-                        if( height_map[x0 + dx,y_n] > -1000 ):
-                        
-                            y_nh = height_map[x0 + dx,y_n]
+                        if height_map[x0+dx, y_n] > -1000:
+                            y_nh = height_map[x0+dx, y_n]
                             y_n_done = True
                             break
                 else:
                     y_n_done = True
 
-
         min_h = 1000.0
         max_h = inferred_height_map[x0,y0]
 
-        if(x_ph > -1000):
-            min_h = min(x_ph,min_h)
-            max_h = max(x_ph,max_h)
+        if x_ph > -1000:
+            min_h = min(x_ph, min_h)
+            max_h = max(x_ph, max_h)
 
-        if(x_nh > -1000):
-            min_h = min(x_nh,min_h)
-            max_h = max(x_nh,max_h)
+        if x_nh > -1000:
+            min_h = min(x_nh, min_h)
+            max_h = max(x_nh, max_h)
 
-        if(y_ph > -1000):
-            min_h = min(y_ph,min_h)
-            max_h = max(y_ph,max_h)
+        if y_ph > -1000:
+            min_h = min(y_ph, min_h)
+            max_h = max(y_ph, max_h)
         
-        if(x_nh > -1000):
-            min_h = min(y_nh,min_h)
-            max_h = max(y_nh,max_h)
+        if x_nh > -1000:
+            min_h = min(y_nh, min_h)
+            max_h = max(y_nh, max_h)
         
-
-
         dh = max_h - min_h 
-
-        if(dh > 0):
-            output_guessed_height_delta[x0,y0] = dh
+        if dh > 0:
+            output_guessed_height_delta[x0, y0] = dh
 
     @staticmethod
     @cuda.jit
-    def __calculate_slope(height_map,xy_size,xy_resolution,output_slope_map_x,output_slope_map_y, output_roughness_map):
+    def __calculate_slope(height_map, xy_size, xy_resolution, output_slope_map_x, output_slope_map_y, output_roughness_map):
         x0, y0 = cuda.grid(2)
-        if(x0 >= xy_size or y0 >= xy_size):
+        if x0 >= xy_size or y0 >= xy_size:
             return
 
         n_good_pts = 0
-
         radius = 1
         for x in range(max(0,x0 - radius), min(xy_size, x0 + radius + 1)):
             for y in range(max(0,y0 - radius), min(xy_size, y0 + radius + 1)):
-                if( height_map[x,y] > -1000 ):
+                if height_map[x,y] > -1000:
                     n_good_pts += 1
-        
-        if(n_good_pts <3):
+        if n_good_pts < 3:
             return
 
-        pts = numba.cuda.local.array((3,9),np.float64)
-        
+        pts = numba.cuda.local.array((3, 9), np.float64)
         i=0
         mean_x = 0.0
         mean_y = 0.0
         mean_z = 0.0
         for x in range(max(0,x0 - radius), min(xy_size, x0 + radius + 1)):
             for y in range(max(0,y0 - radius), min(xy_size, y0 + radius + 1)):
-                if( height_map[x,y] > -1000 ):
+                if height_map[x,y] > -1000:
                     pts[0,i] = x * xy_resolution
                     pts[1,i] = y * xy_resolution
                     pts[2,i] = height_map[x,y]
@@ -714,9 +691,7 @@ class Gvom:
                     mean_x += pts[0,i]
                     mean_y += pts[1,i]
                     mean_z += pts[2,i]
-
                     i+=1
-        
         mean_x /= float(i)
         mean_y /= float(i)
         mean_z /= float(i)
@@ -726,7 +701,7 @@ class Gvom:
         xz=0.0
         yy=0.0
         yz=0.0  
-        for i in range(0,n_good_pts):
+        for i in range(0, n_good_pts):
             xx += (pts[0,i] - mean_x)*(pts[0,i] - mean_x)
             xy += (pts[0,i] - mean_x)*(pts[1,i] - mean_y)
             xz += (pts[0,i] - mean_x)*(pts[2,i] - mean_z)
@@ -734,42 +709,29 @@ class Gvom:
             yz += (pts[1,i] - mean_y)*(pts[2,i] - mean_z)
 
         det = xx*yy - xy*xy
-        if(det == 0.0):
+        if det == 0.0:
             return
 
         a0 = (yy*xz - xy*yz) / det
         a1 = (xx*yz - xy*xz) / det
+        m = math.sqrt(a0*a0 + a1*a1 + 1)
+        a0 /= m
+        a1 /= m
 
         error = 0.0
-
-        # A*x + B*y + C*z = D 
-        # n = [A,B,C]
-        # z = a0 * x + a1 * y
-        # 0 = a0 * x + a1 * y - z
-        # D = 0, A = a0, B = a1, C = -1
-        # n = [-a0,-a1,1]
-        # theta_ = atan2(1,-a0)
-
-        m = math.sqrt(a0*a0 + a1*a1 + 1)
-        a0/=m
-        a1/=m
-
         for i in range(0,n_good_pts):
             e = (pts[2,i] - mean_z) - (a0 * (pts[0,i] - mean_x) + a1 * (pts[1,i] - mean_y))
             error += e*e
-
+        
         error /= float(n_good_pts)
-        if(error >0):
+        if error > 0:
             error = math.log(error)
         output_roughness_map[x0,y0] = error
 
-        x_angle = math.atan2(a0,1.0/m)
-        y_angle = math.atan2(a1,1.0/m)
-
-        output_slope_map_x[x0,y0] = x_angle
-        output_slope_map_y[x0,y0] = y_angle
-
-        pass
+        x_angle = math.atan2(a0, 1.0/m)
+        y_angle = math.atan2(a1, 1.0/m)
+        output_slope_map_x[x0, y0] = x_angle
+        output_slope_map_y[x0, y0] = y_angle
 
     @staticmethod
     @cuda.jit
