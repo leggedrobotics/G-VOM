@@ -475,13 +475,13 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __make_negative_obstacle_map(guessed_height_delta,negative_obstacle_map,negative_obstacle_threshold,xy_size):
+    def __make_negative_obstacle_map(guessed_height_delta, negative_obstacle_map, negative_obstacle_threshold, xy_size):
         x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
+        if x >= xy_size or y >= xy_size:
             return
-
-        if(guessed_height_delta[x,y] > negative_obstacle_threshold):
-            negative_obstacle_map[x,y] = 100
+        
+        if guessed_height_delta[x, y] > negative_obstacle_threshold:
+            negative_obstacle_map[x, y] = 100
 
     @staticmethod
     @cuda.jit
