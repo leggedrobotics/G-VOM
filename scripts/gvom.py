@@ -558,20 +558,18 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __guess_height(height_map,inferred_height_map,xy_size,xy_resolution,slope_map_x,slope_map_y,output_guessed_height_delta):
+    def __guess_height(height_map, inferred_height_map, xy_size, xy_resolution, slope_map_x, slope_map_y, output_guessed_height_delta):
         x0, y0 = cuda.grid(2)
-        if(x0 >= xy_size or y0 >= xy_size):
+        if x0 >= xy_size or y0 >= xy_size:
             return
-        if( height_map[x0,y0] > -1000 ):
-            return
-        if(inferred_height_map[x0,y0] == -1000.0):
+
+        if height_map[x0,y0] > -1000 or inferred_height_map[x0,y0] == -1000.0:
             return
 
         x_p_done = False
         x_n_done = False
         y_p_done = False
         y_n_done = False
-
 
         x_p = x0
         x_ph = -1000
@@ -582,103 +580,88 @@ class Gvom:
         y_n = y0
         y_nh = -1000
 
-
         i = 0
-        while (i < 15 ) and (not (x_n_done and x_n_done and y_p_done and y_n_done)): 
-
+        while i < 15 and not (x_n_done and x_n_done and y_p_done and y_n_done): 
             x_p += 1
             x_n -= 1
             y_p += 1
             y_n -= 1
-
             i += 1
 
             if not x_p_done:
-                if(x_p < xy_size):
-
-                    for dy in range(-i,i):
-                        if(y0 + dy >= xy_size or y0+dy <0):
+                if x_p < xy_size:
+                    for dy in range(-i, i):
+                        if y0+dy >= xy_size or y0+dy < 0:
                             continue
 
-                        if( height_map[x_p,y0 + dy] > -1000 ):
-                        
-                            x_ph = height_map[x_p,y0 + dy]
+                        if height_map[x_p, y0+dy] > -1000:
+                            x_ph = height_map[x_p, y0+dy]
                             x_p_done = True
                             break
                 else:
                     x_p_done = True
 
             if not x_n_done:
-                if(x_n >= 0):
-
-                    for dy in range(-i + 1 ,i + 1):
-                        if(y0 + dy >= xy_size or y0+dy <0):
+                if x_n >= 0:
+                    for dy in range(-i+1, i+1):
+                        if y0+dy >= xy_size or y0+dy < 0:
                             continue
 
-                        if( height_map[x_n,y0 + dy] > -1000 ):
-                        
-                            x_nh = height_map[x_n,y0 + dy]
+                        if height_map[x_n, y0+dy] > -1000:
+                            x_nh = height_map[x_n, y0+dy]
                             x_n_done = True
                             break
                 else:
                     x_n_done = True
             
             if not y_p_done:
-                if(y_p < xy_size):
-
-                    for dx in range(-i+1,i+1):
-                        if(x0 + dx >= xy_size or x0+dx <0):
+                if y_p < xy_size:
+                    for dx in range(-i+1, i+1):
+                        if x0+dx >= xy_size or x0+dx < 0:
                             continue
 
-                        if( height_map[x0+dx,y_p] > -1000 ):
-                        
-                            y_ph = height_map[x0+dx,y_p]
+                        if height_map[x0+dx, y_p] > -1000:
+                            y_ph = height_map[x0+dx, y_p]
                             y_p_done = True
                             break
                 else:
                     y_p_done = True
             
             if not y_n_done:
-                if(y_n >= 0):
-
-                    for dx in range(-i ,i ):
-                        if(x0 + dx >= xy_size or x0+dx <0):
+                if y_n >= 0:
+                    for dx in range(-i, i):
+                        if x0+dx >= xy_size or x0+dx < 0:
                             continue
 
-                        if( height_map[x0 + dx,y_n] > -1000 ):
-                        
-                            y_nh = height_map[x0 + dx,y_n]
+                        if height_map[x0+dx, y_n] > -1000:
+                            y_nh = height_map[x0+dx, y_n]
                             y_n_done = True
                             break
                 else:
                     y_n_done = True
 
-
         min_h = 1000.0
         max_h = inferred_height_map[x0,y0]
 
-        if(x_ph > -1000):
-            min_h = min(x_ph,min_h)
-            max_h = max(x_ph,max_h)
+        if x_ph > -1000:
+            min_h = min(x_ph, min_h)
+            max_h = max(x_ph, max_h)
 
-        if(x_nh > -1000):
-            min_h = min(x_nh,min_h)
-            max_h = max(x_nh,max_h)
+        if x_nh > -1000:
+            min_h = min(x_nh, min_h)
+            max_h = max(x_nh, max_h)
 
-        if(y_ph > -1000):
-            min_h = min(y_ph,min_h)
-            max_h = max(y_ph,max_h)
+        if y_ph > -1000:
+            min_h = min(y_ph, min_h)
+            max_h = max(y_ph, max_h)
         
-        if(x_nh > -1000):
-            min_h = min(y_nh,min_h)
-            max_h = max(y_nh,max_h)
+        if x_nh > -1000:
+            min_h = min(y_nh, min_h)
+            max_h = max(y_nh, max_h)
         
-
-
         dh = max_h - min_h 
-
-        if(dh > 0):
-            output_guessed_height_delta[x0,y0] = dh
+        if dh > 0:
+            output_guessed_height_delta[x0, y0] = dh
 
     @staticmethod
     @cuda.jit
