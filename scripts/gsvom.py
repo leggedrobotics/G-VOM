@@ -96,7 +96,7 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_pointcloud(self, pointcloud, ego_position, transform=None):
+    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_image):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -130,9 +130,9 @@ class Gsvom:
         blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
         blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
 
-        ###### Transform pointcloud ######
-        if not transform is None:
-            self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, transform, point_count)
+        ###### Transform pointcloud to world frame ######
+        if not lidar_to_world is None:
+            self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
 
         ###### Count points in each voxel and number of rays through each voxel ######
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
