@@ -27,12 +27,11 @@ class Gsvom:
     ground_to_lidar_height:         Distance between the ground and the LiDAR, used to fill in height information around the robot
     xy_eigen_dist:                  The number of voxels in the xy directions used to calculate eigen values of point distribution and surface slope
     z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
-    camera_intrinsic_matrix:        The perspective projection matrix of the camera
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist, camera_intrinsic_matrix):
+                 xy_eigen_dist, z_eigen_dist):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -54,7 +53,6 @@ class Gsvom:
         # This radius is in number of voxels, ie r = 0 -> just points within the voxel, r=1 a 3x3 voxel cube centered on the voxel
         self.z_eigen_dist = z_eigen_dist
 
-        self.intrinsic_matrix = camera_intrinsic_matrix
         self.semantic_feature_length = 3 # The number of dimensions of the semantic features (for now it is just the RGB value)
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
@@ -107,7 +105,7 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_image):
+    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -123,8 +121,8 @@ class Gsvom:
         image_width = image.shape[0]
         image_height = image.shape[1]
         image = cuda.to_device(image)
-        intrinsic_matrix = cuda.to_device(self.intrinsic_matrix)
-        world_to_image = cuda.to_device(world_to_image)
+        projection_matrix = cuda.to_device(projection_matrix)
+        world_to_camera = cuda.to_device(world_to_camera)
 
         blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
         blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
@@ -160,8 +158,8 @@ class Gsvom:
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
         
         ###### Paint the pointcloud ######
-        self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, intrinsic_matrix,
-                                                                           world_to_image, image_width, image_height, point_semantic_labels)
+        self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
+                                                                           world_to_camera, image_width, image_height, point_semantic_labels)
         
         ###### Count points in each voxel and number of rays through each voxel ######
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
