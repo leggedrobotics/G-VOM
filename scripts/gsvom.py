@@ -12,7 +12,7 @@ config.CUDA_LOW_OCCUPANCY_WARNINGS = False
 class Gsvom:
 
     """ 
-    A class to convert lidar pointclouds into a cost map, includes semantic information
+    A class to convert lidar pointclouds and semantically segmented images into a cost map
     xy_resolution:                  x,y resolution in meters of each voxel
     z_resolution:                   z resolution in meters of each voxel
     xy_size:                        Number of voxels in x,y
@@ -24,11 +24,15 @@ class Gsvom:
     slope_distance_threshold:       How steep does a slope have to be to count as a positive obstacle
     robot_height:                   The height of the robot (overhangs higher than this do not count as obstacles)
     robot_radius:                   Radius of the area which counts as the robot for height map calculation
+    ground_to_lidar_height:         Distance between the ground and the LiDAR, used to fill in height information around the robot
+    xy_eigen_dist:                  The number of voxels in the xy directions used to calculate eigen values of point distribution and surface slope
+    z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
+    camera_intrinsic_matrix:        The perspective projection matrix of the camera
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist):
+                 xy_eigen_dist, z_eigen_dist, camera_intrinsic_matrix):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -50,6 +54,9 @@ class Gsvom:
         # This radius is in number of voxels, ie r = 0 -> just points within the voxel, r=1 a 3x3 voxel cube centered on the voxel
         self.z_eigen_dist = z_eigen_dist
 
+        self.intrinsic_matrix = camera_intrinsic_matrix
+        self.semantic_feature_length = 3 # The number of dimensions of the semantic features (for now it is just the RGB value)
+
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
 
@@ -62,6 +69,7 @@ class Gsvom:
         self.metrics_buffer = [None] * self.buffer_size
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
+        self.semantic_labels_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
             self.semaphores.append(threading.Semaphore())
@@ -73,6 +81,7 @@ class Gsvom:
         self.combined_origin = None
         self.combined_metrics = None
         self.combined_cell_count_cpu = None
+        self.combined_semantic_labels = None
 
         self.last_combined_index_map = None
         self.last_combined_hit_count = None
@@ -81,12 +90,14 @@ class Gsvom:
         self.last_combined_origin = None
         self.last_combined_metrics = None
         self.last_combined_cell_count_cpu = None
+        self.last_combined_semantic_labels = None
 
         self.height_map = None
         self.inferred_height_map = None
         self.roughness_map = None
         self.guessed_height_delta = None
         self.voxels_eigenvalues = None
+        self.semantic_labels = None
 
         self.threads_per_block = 256
         self.threads_per_block_3D = (8, 8, 4)
@@ -109,16 +120,32 @@ class Gsvom:
             return
         pointcloud = cuda.to_device(pointcloud)
 
+        image_width = image.shape[0]
+        image_height = image.shape[1]
+        image = cuda.to_device(image)
+        intrinsic_matrix = cuda.to_device(self.intrinsic_matrix)
+        world_to_image = cuda.to_device(world_to_image)
+
+        blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
+        blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
+        blockspergrid_cell_2D = math.ceil(point_count / self.threads_per_block_2D[0])
+        blockspergrid_metric_2D = math.ceil(self.semantic_feature_length / self.threads_per_block_2D[1])
+        blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_metric_2D)
+
         cell_count = cuda.to_device(np.zeros([1], dtype=np.int32))
 
         index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](index_map, -1, self.xy_size * self.xy_size * self.z_size)
+        self.__init_1D_array[self.blocks, self.threads_per_block](index_map, -1, self.voxel_count)
 
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_hit_count, 0, self.xy_size * self.xy_size * self.z_size)
+        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_hit_count, 0, self.voxel_count)
 
         tmp_total_count = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.xy_size * self.xy_size * self.z_size)
+        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.voxel_count)
+
+        point_semantic_labels = cuda.device_array([point_count, self.semantic_feature_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_semantic_labels, 0, point_count,
+                                                                          self.semantic_feature_length)
 
         origin = np.zeros([3])
         origin[0] = math.floor((ego_position[0] / self.xy_resolution) - self.xy_size / 2)
@@ -127,13 +154,15 @@ class Gsvom:
         ego_position = cuda.to_device(ego_position)
         origin = cuda.to_device(origin)
 
-        blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
-        blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
-
         ###### Transform pointcloud to world frame ######
         if not lidar_to_world is None:
+            lidar_to_world = cuda.to_device(lidar_to_world)
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
-
+        
+        ###### Paint the pointcloud ######
+        self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, intrinsic_matrix,
+                                                                           world_to_image, image_width, image_height, point_semantic_labels)
+        
         ###### Count points in each voxel and number of rays through each voxel ######
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
@@ -142,6 +171,10 @@ class Gsvom:
         ###### Populate the lookup table with the correct indexes ######
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
                                                                   self.voxel_count)
+        
+        ###### Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data ######
+        max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
+        self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, tmp_hit_count, self.voxel_count)
 
         ###### Make index map so we only need to store data on non-empty voxels ######
         cell_count_cpu = cell_count.copy_to_host()[0]
@@ -231,8 +264,8 @@ class Gsvom:
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_metric_2D)
 
-        self.combined_metrics = cuda.device_array([self.combined_cell_count_cpu,self.metrics_count], dtype=np.float32)
-        self.__init_2D_array[blockspergrid_2D,self.threads_per_block_2D](self.combined_metrics,0,self.combined_cell_count_cpu,
+        self.combined_metrics = cuda.device_array([self.combined_cell_count_cpu, self.metrics_count], dtype=np.float32)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.combined_metrics, 0, self.combined_cell_count_cpu,
                                                                          self.metrics_count)
 
         for i in range(0, self.buffer_size):
@@ -1269,7 +1302,7 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __calculate_covariance(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, count,metrics,
+    def __calculate_covariance(xy_resolution, z_resolution, xy_size, z_size, min_distance, index_map, points, count, metrics,
                                point_count, origin, xy_eigen_dist, z_eigen_dist):
         i = cuda.grid(1)
         if i < point_count:
@@ -1414,6 +1447,45 @@ class Gsvom:
             voxels_eigenvalues[i, 0] = q + 2.0 * p * math.cos(phi)
             voxels_eigenvalues[i, 2] = q + 2.0 * p * math.cos(phi + (2.0*math.pi/3.0))
             voxels_eigenvalues[i, 1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
+    
+    @staticmethod
+    @cuda.jit
+    def __paint_pointcloud(pointcloud, point_count, image, intrinsic_matrix, extrinsic_matrix, image_width, image_height, labels):
+        i = cuda.grid(1)
+        if i >= point_count:
+            return
+
+        pt_x_w = pointcloud[i, 0]
+        pt_y_w = pointcloud[i, 1]
+        pt_z_w = pointcloud[i, 2]
+
+        pt_x_cam = extrinsic_matrix[0, 0]*pt_x_w + extrinsic_matrix[0, 1]*pt_y_w + extrinsic_matrix[0, 2]*pt_z_w + extrinsic_matrix[0, 3]
+        pt_y_cam = extrinsic_matrix[1, 0]*pt_x_w + extrinsic_matrix[1, 1]*pt_y_w + extrinsic_matrix[1, 2]*pt_z_w + extrinsic_matrix[1, 3]
+        pt_z_cam = extrinsic_matrix[2, 0]*pt_x_w + extrinsic_matrix[2, 1]*pt_y_w + extrinsic_matrix[2, 2]*pt_z_w + extrinsic_matrix[2, 3]
+        # Make sure the point is in front of the camera
+        if pt_z_cam <= 0:
+            return
+        
+        px_x = intrinsic_matrix[0, 0]*pt_x_cam + intrinsic_matrix[0, 1]*pt_y_cam + intrinsic_matrix[0, 2]*pt_z_cam
+        px_y = intrinsic_matrix[1, 0]*pt_x_cam + intrinsic_matrix[1, 1]*pt_y_cam + intrinsic_matrix[1, 2]*pt_z_cam
+        px_z = intrinsic_matrix[2, 0]*pt_x_cam + intrinsic_matrix[2, 1]*pt_y_cam + intrinsic_matrix[2, 2]*pt_z_cam
+        px_x = int(round(px_x/px_z))
+        px_y = int(round(px_y/px_z))
+        # Make sure the point is projected within the image bounds
+        if px_x < 0 or px_x >= image_width or px_y < 0 or px_y >= image_height:
+            return
+        
+        # Extract the semantic label (for now it is just the color)
+        for channel in range(3):
+            labels[i, channel] = image[px_x, px_y, channel]
+    
+    @staticmethod
+    @cuda.jit
+    def __find_max_in_1D_array(found_max_value, array, array_length):
+        i = cuda.grid(1)
+        if i >= array_length:
+            return
+        cuda.atomic.max(found_max_value, 0, array[i])
 
     @staticmethod
     @cuda.jit
