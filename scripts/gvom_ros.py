@@ -20,25 +20,25 @@ class VoxelMapper:
         self.tf_listener = tf2_ros.TransformListener(self.tfBuffer)
         self.tf_transformer = tf.TransformerROS()
 
-        self.odom_frame = rospy.get_param("~odom_frame", "/camera_init")
-        self.xy_resolution = rospy.get_param("~xy_resolution", 0.40)
+        self.odom_frame = rospy.get_param("~odom_frame", "odom")
+        self.xy_resolution = rospy.get_param("~xy_resolution", 0.20)
         self.z_resolution = rospy.get_param("~z_resolution", 0.2)
         self.width = rospy.get_param("~width", 256)
         self.height = rospy.get_param("~height", 64)
         self.buffer_size = rospy.get_param("~buffer_size", 4)
-        self.min_point_distance = rospy.get_param("~min_point_distance", 1.0)
+        self.min_point_distance = rospy.get_param("~min_point_distance", 0.75)
         self.positive_obstacle_threshold = rospy.get_param("~positive_obstacle_threshold", 0.50)
         self.negative_obstacle_threshold = rospy.get_param("~negative_obstacle_threshold", 0.5)
         self.density_threshold = rospy.get_param("~density_threshold", 50)
         self.slope_obsacle_threshold = rospy.get_param("~slope_obsacle_threshold", 0.3)
         self.min_roughness = rospy.get_param("~min_roughness", -10)
         self.max_roughness = rospy.get_param("~max_roughness", 0)
-        self.robot_height = rospy.get_param("~robot_height", 2.0)
-        self.robot_radius = rospy.get_param("~robot_radius", 4.0)
-        self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 1.0)
+        self.robot_height = rospy.get_param("~robot_height", 1.0)
+        self.robot_radius = rospy.get_param("~robot_radius", 1.0)
+        self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.5)
         self.freq = rospy.get_param("~freq", 10.) # Hz
-        self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist",1)
-        self.z_eigen_dist = rospy.get_param("~z_eigen_dist",1)
+        self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist",2)
+        self.z_eigen_dist = rospy.get_param("~z_eigen_dist",2)
         
         
         self.voxel_mapper = gvom.Gvom(
@@ -58,8 +58,8 @@ class VoxelMapper:
             self.z_eigen_dist
         )
 
-        self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar,queue_size=1)
-        self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom,queue_size=1)
+        self.sub_cloud = rospy.Subscriber("/point_cloud_filter/lidar/point_cloud_filtered", PointCloud2, self.cb_lidar,queue_size=1)
+        self.sub_odom = rospy.Subscriber("/state_estimator/odometry", Odometry, self.cb_odom,queue_size=1)
         
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size = 1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size = 1)
@@ -89,7 +89,7 @@ class VoxelMapper:
         odom_data = self.odom_data
 
         scan_time = time.time()
-        lidar_frame = data.header.frame_id
+        lidar_frame = data.header.frame_id # This is lidar
         trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp,rospy.Duration(1))
 
         translation = np.zeros([3])
