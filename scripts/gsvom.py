@@ -135,16 +135,6 @@ class Gsvom:
         index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
         self.__init_1D_array[self.blocks, self.threads_per_block](index_map, -1, self.voxel_count)
 
-        tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_hit_count, 0, self.voxel_count)
-
-        tmp_total_count = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.voxel_count)
-
-        point_semantic_labels = cuda.device_array([point_count, self.semantic_feature_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_semantic_labels, 0, point_count,
-                                                                          self.semantic_feature_length)
-
         origin = np.zeros([3])
         origin[0] = math.floor((ego_position[0] / self.xy_resolution) - self.xy_size / 2)
         origin[1] = math.floor((ego_position[1] / self.xy_resolution) - self.xy_size / 2)
@@ -158,21 +148,30 @@ class Gsvom:
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
         
         ###### Paint the pointcloud ######
+        point_semantic_labels = cuda.device_array([point_count, self.semantic_feature_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_semantic_labels, 0, point_count,
+                                                                          self.semantic_feature_length)
+
         self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
                                                                            world_to_camera, image_width, image_height, point_semantic_labels)
         
-        ###### Count points in each voxel and number of rays through each voxel ######
+        ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
+        tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
+        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_hit_count, 0, self.voxel_count)
+
+        tmp_total_count = cuda.device_array([self.voxel_count], dtype=np.int32)
+        self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.voxel_count)
+
+        point_to_voxel_map = cuda.device_array([point_count], dtype=np.int32)
+        self.__init_1D_array[self.blocks, self.threads_per_block](point_to_voxel_map, -1, point_count)
+
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
-                                                                      tmp_total_count, point_count, ego_position, origin)
+                                                                      tmp_total_count, point_to_voxel_map, point_count, ego_position, origin)
 
         ###### Populate the lookup table with the correct indexes ######
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
                                                                   self.voxel_count)
-        
-        ###### Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data ######
-        max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
-        self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, tmp_hit_count, self.voxel_count)
 
         ###### Make index map so we only need to store data on non-empty voxels ######
         cell_count_cpu = cell_count.copy_to_host()[0]
@@ -185,6 +184,21 @@ class Gsvom:
 
         self.__move_data[blocks_map, self.threads_per_block](tmp_hit_count, hit_count, index_map, self.voxel_count)
         self.__move_data[blocks_map, self.threads_per_block](tmp_total_count, total_count, index_map, self.voxel_count)
+
+        ###### Pick a semantic label for each voxel ######
+        # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
+        max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
+        self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
+        max_number_hits_cpu = max_number_hits.copy_to_host()[0]
+
+        all_semantic_labels_per_voxel = cuda.to_device(np.zeros([max_number_hits_cpu*self.semantic_feature_length, cell_count_cpu],
+                                                                dtype=np.int32))
+        voxel_stack_pointers = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
+        self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](point_semantic_labels,
+                                                                                              self.semantic_feature_length, pointcloud, 
+                                                                                              point_count, self.xy_resolution, self.xy_size,
+                                                                                              self.z_resolution, self.z_size, origin, index_map, voxel_stack_pointers, all_semantic_labels_per_voxel)
+
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -204,6 +218,8 @@ class Gsvom:
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
+        
+        return point_semantic_labels.copy_to_host()
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
@@ -1126,39 +1142,38 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_count, ego_position, origin):
+    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_to_voxel,
+                      point_count, ego_position, origin):
         i = cuda.grid(1)
-        if(i < point_count):
-
-            d2 = points[i, 0]*points[i, 0] + points[i, 1] * \
-                points[i, 1] + points[i, 2]*points[i, 2]
-
+        if i < point_count:
+            
+            # Check the point is not too close to the robot
+            d2 = points[i, 0]*points[i, 0] + points[i, 1]*points[i, 1] + points[i, 2]*points[i, 2]
             if(d2 < min_distance*min_distance):
                 return
 
+            # Check the point is not out of the bounds of the map
             oob = False
-
             x_index = math.floor((points[i, 0] / xy_resolution) - origin[0])
             if(x_index < 0 or x_index >= xy_size):
                 oob = True
-
             y_index = math.floor((points[i, 1] / xy_resolution) - origin[1])
             if(y_index < 0 or y_index >= xy_size):
                 oob = True
-
             z_index = math.floor((points[i, 2] / z_resolution) - origin[2])
             if(z_index < 0 or z_index >= z_size):
                 oob = True
 
             if not oob:
-                # get the index of the hit
+                # Get the index of the hit
                 index = x_index + y_index*xy_size + z_index*xy_size*xy_size
-
-                # update the hit count for the index
+                # Update the hit count for the index
                 cuda.atomic.add(hit_count, index, 1)
                 cuda.atomic.add(total_count, index, 1)
+                # Assign index to the point to voxel map
+                point_to_voxel[i] = index
+            
             # Trace the ray
-
             pt = numba.cuda.local.array(3, numba.float32)
             end = numba.cuda.local.array(3, numba.float32)
             slope = numba.cuda.local.array(3, numba.float32)
@@ -1175,47 +1190,37 @@ class Gsvom:
             slope[1] = end[1] - pt[1]
             slope[2] = end[2] - pt[2]
 
-            ray_length = math.sqrt(
-                slope[0]*slope[0] + slope[1]*slope[1] + slope[2]*slope[2])
-
+            ray_length = math.sqrt(slope[0]*slope[0] + slope[1]*slope[1] + slope[2]*slope[2])
             slope[0] = slope[0] / ray_length
             slope[1] = slope[1] / ray_length
             slope[2] = slope[2] / ray_length
 
             slope_max = max(abs(slope[0]), max(abs(slope[1]), abs(slope[2])))
-
             slope_index = 0
-
-            if(slope_max == abs(slope[1])):
+            if slope_max == abs(slope[1]):
                 slope_index = 1
-            if(slope_max == abs(slope[2])):
+            if slope_max == abs(slope[2]):
                 slope_index = 2
 
             length = 0
             direction = slope[slope_index]/abs(slope[slope_index])
-            while (length < ray_length - 1):
+            while length < ray_length - 1:
                 pt[slope_index] += direction
-                pt[(slope_index + 1) % 3] += slope[(slope_index + 1) %
-                                                   3] / abs(slope[slope_index])
-                pt[(slope_index + 2) % 3] += slope[(slope_index + 2) %
-                                                   3] / abs(slope[slope_index])
+                pt[(slope_index + 1) % 3] += slope[(slope_index + 1) % 3] / abs(slope[slope_index])
+                pt[(slope_index + 2) % 3] += slope[(slope_index + 2) % 3] / abs(slope[slope_index])
 
                 x_index = math.floor(pt[0] - origin[0])
                 if(x_index < 0 or x_index >= xy_size):
                     return
-
                 y_index = math.floor(pt[1] - origin[1])
                 if(y_index < 0 or y_index >= xy_size):
                     return
-
                 z_index = math.floor(pt[2] - origin[2])
                 if(z_index < 0 or z_index >= z_size):
                      return
                      
                 index = x_index + y_index*xy_size + z_index*xy_size*xy_size
-
                 cuda.atomic.add(total_count, index, 1)
-
                 length += abs(1.0/slope[slope_index])
 
     @staticmethod
@@ -1479,6 +1484,32 @@ class Gsvom:
     
     @staticmethod
     @cuda.jit
+    def __aggregate_semantic_labels_in_voxels(point_labels, label_size, points, point_count, xy_resolution, xy_size, z_resolution, z_size,
+                                              origin, index_map, stack_pointers, labels_per_voxel):
+        i = cuda.grid(1)
+        if i >= point_count:
+            return
+        
+        # Check the point is not out of the bounds of the map
+        x_index = math.floor((points[i, 0] / xy_resolution) - origin[0])
+        if(x_index < 0 or x_index >= xy_size):
+            return
+        y_index = math.floor((points[i, 1] / xy_resolution) - origin[1])
+        if(y_index < 0 or y_index >= xy_size):
+            return
+        z_index = math.floor((points[i, 2] / z_resolution) - origin[2])
+        if(z_index < 0 or z_index >= z_size):
+            return
+
+        # Put the label at the top of the voxel's stack
+        voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
+        buffer_index = index_map[voxel_index]
+        stack_index = cuda.atomic.add(stack_pointers, buffer_index, label_size)
+        for i in range(label_size):
+            labels_per_voxel[buffer_index, stack_index+1] = point_labels[i, i]
+    
+    @staticmethod
+    @cuda.jit
     def __find_max_in_1D_array(found_max_value, array, array_length):
         i = cuda.grid(1)
         if i >= array_length:
@@ -1487,7 +1518,7 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __init_1D_array(array,value,length):
+    def __init_1D_array(array, value, length):
         i = cuda.grid(1)
         if i >= length:
             return
@@ -1495,7 +1526,7 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __init_2D_array(array,value,width,height):
+    def __init_2D_array(array, value, width, height):
         x, y = cuda.grid(2)
         if x >= width or y >= height:
             return
