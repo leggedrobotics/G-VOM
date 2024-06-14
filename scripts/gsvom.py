@@ -202,13 +202,14 @@ class Gsvom:
         self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
         max_number_hits_cpu = max_number_hits.copy_to_host()[0]
         # Associate point labels with voxels
-        all_semantic_labels_per_voxel = cuda.to_device(np.zeros([max_number_hits_cpu*self.semantic_feature_length, cell_count_cpu],
+        all_semantic_labels_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu*self.semantic_feature_length],
                                                                 dtype=np.int32))
         voxel_stack_pointers = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
         self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](point_semantic_labels,
-                                                                                              self.semantic_feature_length, pointcloud, 
+                                                                                              self.semantic_feature_length, pointcloud,
                                                                                               point_count, self.xy_resolution, self.xy_size,
-                                                                                              self.z_resolution, self.z_size, origin, index_map, voxel_stack_pointers, all_semantic_labels_per_voxel)
+                                                                                              self.z_resolution, self.z_size, origin, index_map,
+                                                                                              voxel_stack_pointers, all_semantic_labels_per_voxel)
         # Find the label for each voxel
         blocks_semantic_assignment = int(np.ceil(cell_count_cpu / self.threads_per_block))
         # Here the unique label arrays are a hack to have arrays with parametrized size inside the cuda kernel, they are needed only inside
