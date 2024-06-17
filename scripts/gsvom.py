@@ -68,6 +68,7 @@ class Gsvom:
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
         self.semantic_labels_buffer = [None] * self.buffer_size
+        self.semantic_label_votes_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
             self.semaphores.append(threading.Semaphore())
@@ -95,7 +96,6 @@ class Gsvom:
         self.roughness_map = None
         self.guessed_height_delta = None
         self.voxels_eigenvalues = None
-        self.semantic_labels = None
 
         self.threads_per_block = 256
         self.threads_per_block_3D = (8, 8, 4)
@@ -148,20 +148,12 @@ class Gsvom:
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
         
         ###### Paint the pointcloud ######
-        pointcloud_painting_start_event = cuda.event()
-        pointcloud_painting_end_event = cuda.event()
-        pointcloud_painting_start_event.record()
         point_semantic_labels = cuda.device_array([point_count, self.semantic_feature_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_semantic_labels, 0, point_count,
                                                                           self.semantic_feature_length)
 
         self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
                                                                            world_to_camera, image_width, image_height, point_semantic_labels)
-        
-        pointcloud_painting_end_event.record()
-        pointcloud_painting_end_event.synchronize()
-        pointcloud_painting_time = cuda.event_elapsed_time(pointcloud_painting_start_event, pointcloud_painting_end_event)
-        print(f"Pointcloud painting took: {pointcloud_painting_time}")
         
         ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
@@ -194,9 +186,6 @@ class Gsvom:
         self.__move_data[blocks_map, self.threads_per_block](tmp_total_count, total_count, index_map, self.voxel_count)
 
         ###### Pick a semantic label for each voxel ######
-        voxel_painting_start_event = cuda.event()
-        voxel_painting_end_event = cuda.event()
-        voxel_painting_start_event.record()
         # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
         max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
         self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
@@ -221,14 +210,13 @@ class Gsvom:
         voxel_semantic_labels = cuda.device_array([cell_count_cpu, self.semantic_feature_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_semantic_labels, 0, cell_count_cpu,
                                                                           self.semantic_feature_length)
+        voxel_label_votes = cuda.device_array([cell_count_cpu], dtype=np.int32)
+        self.__init_1D_array[blocks_semantic_assignment, self.threads_per_block](voxel_label_votes, 0, cell_count_cpu)
         self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](all_semantic_labels_per_voxel,
                                                                                          self.semantic_feature_length, hit_count,
-                                                                                         cell_count_cpu, unique_labels, unique_label_votes,
-                                                                                         voxel_semantic_labels)
-        voxel_painting_end_event.record()
-        voxel_painting_end_event.synchronize()
-        voxel_painting_time = cuda.event_elapsed_time(voxel_painting_start_event, voxel_painting_end_event)
-        print(f"Voxel painting took: {voxel_painting_time}")
+                                                                                         cell_count_cpu, unique_labels,
+                                                                                         unique_label_votes, voxel_semantic_labels,
+                                                                                         voxel_label_votes)
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -242,6 +230,8 @@ class Gsvom:
         self.metrics_buffer[self.buffer_index] = metrics
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
+        self.semantic_labels_buffer[self.buffer_index] = voxel_semantic_labels
+        self.semantic_label_votes_buffer[self.buffer_index] = voxel_label_votes
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
         self.last_buffer_index = self.buffer_index
@@ -1540,7 +1530,8 @@ class Gsvom:
     
     @staticmethod
     @cuda.jit
-    def __assign_label_to_voxel(all_labels_in_voxel, label_size, hit_counts, voxel_count, unique_labels, unique_label_votes, voxel_labels):
+    def __assign_label_to_voxel(all_labels_in_voxel, label_size, hit_counts, voxel_count, unique_labels, unique_label_votes,
+                                voxel_labels, label_votes):
         i = cuda.grid(1)
         if i >= voxel_count:
             return
@@ -1580,11 +1571,12 @@ class Gsvom:
                 num_unique_labels += 1
         
         max_index = -1
-        max_value = -np.inf
+        max_num_votes = 0
         for label_idx in range(num_unique_labels):
-            if unique_label_votes[i, label_idx] > max_value:
-                max_value = unique_label_votes[i, label_idx]
+            if unique_label_votes[i, label_idx] > max_num_votes:
+                max_num_votes = unique_label_votes[i, label_idx]
                 max_index = label_idx
+        label_votes[i] = max_num_votes
         best_label_start = max_index*label_size
         if best_label_start >= 0:
             for dim_id in range(label_size):
