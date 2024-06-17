@@ -1551,6 +1551,14 @@ class Gsvom:
         for label_idx in range(label_count):
             label_start = label_idx*label_size
 
+            is_zero = True
+            for dim_id in range(label_size):
+                if abs(labels[label_start + dim_id]) > 1e-7:
+                    is_zero = False
+                    break
+            if is_zero:
+                continue
+
             is_unique = True
             for ulabel_idx in range(num_unique_labels):
                 ulabel_start = ulabel_idx*label_size
