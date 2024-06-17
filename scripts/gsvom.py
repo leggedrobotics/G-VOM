@@ -67,7 +67,7 @@ class Gsvom:
         self.metrics_buffer = [None] * self.buffer_size
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
-        self.semantic_labels_buffer = [None] * self.buffer_size
+        self.semantic_label_buffer = [None] * self.buffer_size
         self.semantic_label_votes_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
@@ -230,7 +230,7 @@ class Gsvom:
         self.metrics_buffer[self.buffer_index] = metrics
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
-        self.semantic_labels_buffer[self.buffer_index] = voxel_semantic_labels
+        self.semantic_label_buffer[self.buffer_index] = voxel_semantic_labels
         self.semantic_label_votes_buffer[self.buffer_index] = voxel_label_votes
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
@@ -424,6 +424,29 @@ class Gsvom:
         occupancy_grid = lookup_table >= 0
         return occupancy_grid
 
+    def get_map_as_painted_occupancy_pointcloud(self):
+        """ Returns a point and a label (color) for each occupied cell in the last occupancy map"""
+        # TODO: Switch these to the combined values
+        lookup_table = self.index_buffer[self.last_buffer_index].copy_to_host()
+        origin = self.origin_buffer[self.last_buffer_index].copy_to_host()
+        label_array = self.semantic_label_buffer[self.last_buffer_index].copy_to_host()
+        points = []
+        labels = []
+        for x_ind in range(self.xy_size):
+            for y_ind in range(self.xy_size):
+                for z_ind in range(self.z_size):
+                    index = x_ind + y_ind*self.xy_size + z_ind*self.xy_size*self.xy_size
+                    if lookup_table[index] >= 0:
+                        x = (origin[0] + x_ind + 0.5)*self.xy_resolution
+                        y = (origin[1] + y_ind + 0.5)*self.xy_resolution
+                        z = (origin[2] + z_ind + 0.5)*self.z_resolution
+                        points.append([x, y, z])
+                        voxel_label = label_array[lookup_table[index]]
+                        labels.append(voxel_label)
+        points = np.array(points)
+        labels = np.array(labels)
+        return points, labels
+
     def make_debug_voxel_map(self):
         if(self.combined_cell_count_cpu is None):
             print("No data")
@@ -458,19 +481,18 @@ class Gsvom:
         return output_height_map_voxel
 
     def make_debug_inferred_height_map(self):
-        if(self.height_map is None):
+        if self.height_map is None:
             print("No data")
             return None
 
-        output_height_map_voxel = np.zeros(
-            [self.xy_size*self.xy_size, 3], np.float32)
-
-        blockspergrid_xy = math.ceil(
-            self.xy_size / self.threads_per_block_2D[0])
+        output_height_map_voxel = np.zeros([self.xy_size*self.xy_size, 3], np.float32)
+        blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_2D[0])
         blockspergrid = (blockspergrid_xy, blockspergrid_xy)
-        self.__make_infered_height_map_pointcloud[blockspergrid, self.threads_per_block_2D](
-            self.guessed_height_delta, self.combined_origin, output_height_map_voxel, self.xy_size, self.xy_resolution,self.z_resolution)
-
+        self.__make_infered_height_map_pointcloud[blockspergrid, self.threads_per_block_2D](self.guessed_height_delta,
+                                                                                            self.combined_origin,
+                                                                                            output_height_map_voxel,
+                                                                                            self.xy_size, self.xy_resolution,
+                                                                                            self.z_resolution)
         return output_height_map_voxel
 
     @staticmethod
