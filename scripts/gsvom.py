@@ -212,14 +212,18 @@ class Gsvom:
                                                                                               voxel_stack_pointers, all_semantic_labels_per_voxel)
         # Find the label for each voxel
         blocks_semantic_assignment = int(np.ceil(cell_count_cpu / self.threads_per_block))
+        blockspergrid_cell_2D = math.ceil(cell_count_cpu / self.threads_per_block_2D[0])
+        blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_feature_2D)
         # Here the unique label arrays are a hack to have arrays with parametrized size inside the cuda kernel, they are needed only inside
-        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu*self.semantic_feature_length], dtype=np.float16))
+        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu], dtype=np.float16))
         unique_labels = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu*self.semantic_feature_length], dtype=np.float16))
 
         voxel_semantic_labels = cuda.device_array([cell_count_cpu, self.semantic_feature_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_semantic_labels, 0, cell_count_cpu,
+                                                                          self.semantic_feature_length)
         self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](all_semantic_labels_per_voxel,
                                                                                          self.semantic_feature_length, hit_count,
-                                                                                         self.voxel_count, unique_labels, unique_label_votes,
+                                                                                         cell_count_cpu, unique_labels, unique_label_votes,
                                                                                          voxel_semantic_labels)
         voxel_painting_end_event.record()
         voxel_painting_end_event.synchronize()
@@ -1547,7 +1551,7 @@ class Gsvom:
         for label_idx in range(label_count):
             label_start = label_idx*label_size
 
-            is_unique = False
+            is_unique = True
             for ulabel_idx in range(num_unique_labels):
                 ulabel_start = ulabel_idx*label_size
                 all_match = True
@@ -1574,8 +1578,9 @@ class Gsvom:
                 max_value = unique_label_votes[i, label_idx]
                 max_index = label_idx
         best_label_start = max_index*label_size
-        for dim_id in range(label_size):
-            voxel_labels[i, dim_id] = unique_labels[i, best_label_start + dim_id]
+        if best_label_start >= 0:
+            for dim_id in range(label_size):
+                voxel_labels[i, dim_id] = unique_labels[i, best_label_start + dim_id]
     
     @staticmethod
     @cuda.jit
