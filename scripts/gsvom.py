@@ -331,7 +331,7 @@ class Gsvom:
                                                                              self.total_count_buffer[i], self.min_height_buffer[i],
                                                                              self.index_buffer[i], self.origin_buffer[i],
                                                                              self.label_buffer[i], self.label_votes_buffer[i],
-                                                                             self.xy_size, self.z_size)
+                                                                             self.xy_size, self.z_size, self.label_length)
             self.semaphores[i].release()
 
         if not (self.last_combined_origin is None):
@@ -349,7 +349,7 @@ class Gsvom:
                                                                              self.last_combined_origin,
                                                                              self.last_combined_labels,
                                                                              self.last_combined_label_votes, self.xy_size,
-                                                                             self.z_size)
+                                                                             self.z_size, self.label_length)
 
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
         self.last_combined_hit_count = self.combined_hit_count
@@ -448,9 +448,9 @@ class Gsvom:
     def get_map_as_painted_occupancy_pointcloud(self):
         """ Returns a point and a label (color) for each occupied cell in the last occupancy map"""
         # TODO: Switch these to the combined values
-        lookup_table = self.index_buffer[self.last_buffer_index].copy_to_host()
-        origin = self.origin_buffer[self.last_buffer_index].copy_to_host()
-        label_array = self.label_buffer[self.last_buffer_index].copy_to_host()
+        lookup_table = self.combined_index_map.copy_to_host()
+        origin = self.combined_origin.copy_to_host()
+        label_array = self.combined_labels.copy_to_host()
         points = []
         labels = []
         for x_ind in range(self.xy_size):
@@ -968,49 +968,44 @@ class Gsvom:
     @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count,combined_total_count,combined_min_height, combined_index_map,
                           combined_origin, combined_labels, combined_label_votes, old_metrics, old_hit_count, old_total_count,
-                          old_min_height, old_index_map, old_origin, old_labels, old_label_votes, xy_size, z_size):
+                          old_min_height, old_index_map, old_origin, old_labels, old_label_votes, xy_size, z_size, label_size):
         x, y, z = cuda.grid(3)
 
-        if(x >= xy_size or y >= xy_size or z >= z_size): # Check kernel bounds
+        # Check kernel bounds
+        if x >= xy_size or y >= xy_size or z >= z_size:
             return
 
         # Calculate offset between old and new maps
-
         dx = combined_origin[0] - old_origin[0]
         dy = combined_origin[1] - old_origin[1]
         dz = combined_origin[2] - old_origin[2]
-
-        if((x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0):
+        if (x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0:
             return
 
-        index = combined_index_map[int(
-            x + y * xy_size + z * xy_size * xy_size)]
-        index_old = old_index_map[int(
-            (x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)]
-
-        if(index < 0 or index_old < 0):
+        index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
+        index_old = old_index_map[int((x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)]
+        if index < 0 or index_old < 0:
             return
 
-       
+        # Combine semantic labels
+        if old_label_votes[index_old] > 0:
+            if old_label_votes[index_old] > combined_label_votes[index]:
+                combined_label_votes[index] = old_label_votes[index_old]
+                for dim_id in range(label_size):
+                    combined_labels[index, dim_id] = old_labels[index_old, dim_id]
 
-        
-        ## Combine covariance
-        
-        #self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Count
-        #                               0  1  2               3   4   5   6   7   8
+        ## Combine mean
+        # x
+        mean_x_combined = (combined_metrics[index, 0] * combined_metrics[index, 9] + old_metrics[index_old, 0] * old_metrics[index_old, 9]) / (combined_metrics[index, 9] + old_metrics[index_old, 9])
+        combined_metrics[index, 0] = mean_x_combined
+        # y
+        mean_y_combined = (combined_metrics[index, 1] * combined_metrics[index, 9] + old_metrics[index_old, 1] * old_metrics[index_old, 9]) / (combined_metrics[index, 9] + old_metrics[index_old, 9])
+        combined_metrics[index, 1] = mean_y_combined
+        # z
+        mean_z_combined = (combined_metrics[index, 2] * combined_metrics[index, 9] + old_metrics[index_old, 2] * old_metrics[index_old, 9]) / (combined_metrics[index, 9] + old_metrics[index_old, 9])
+        combined_metrics[index, 2] = mean_z_combined
 
-        
-        # C = (n1 * C1 + n2 * C2 + 
-        #   n1 * (mean_x1 - mean_x_combined) * (mean_y1 - mean_y_combined) + 
-        #   n2 * (mean_x2 - mean_x_combined) * (mean_y2 - mean_y_combined)
-        #   ) / (n1 + n2)
-
-        mean_x_combined = (combined_metrics[index,0] * combined_metrics[index,9] + old_metrics[index_old, 0] * old_metrics[index_old, 9]) / (combined_metrics[index,9] + old_metrics[index_old, 9])
-
-        mean_y_combined = (combined_metrics[index,1] * combined_metrics[index,9] + old_metrics[index_old, 1] * old_metrics[index_old, 9]) / (combined_metrics[index,9] + old_metrics[index_old, 9])
-
-        mean_z_combined = (combined_metrics[index,2] * combined_metrics[index,9] + old_metrics[index_old, 2] * old_metrics[index_old, 9]) / (combined_metrics[index,9] + old_metrics[index_old, 9])
-
+        # Combine covariances
         # xx
         combined_metrics[index,3] =( combined_metrics[index,9] * combined_metrics[index,3] + old_metrics[index_old, 9] * old_metrics[index_old, 3] + 
             combined_metrics[index,9] * (combined_metrics[index,0] - mean_x_combined) * (combined_metrics[index,0] - mean_x_combined) + 
@@ -1044,22 +1039,13 @@ class Gsvom:
         combined_metrics[index,8] =( combined_metrics[index,9] * combined_metrics[index,8] + old_metrics[index_old, 9] * old_metrics[index_old, 8] + 
             combined_metrics[index,9] * (combined_metrics[index,2] - mean_z_combined) * (combined_metrics[index,2] - mean_z_combined) + 
             old_metrics[index_old, 9] *  (old_metrics[index_old,2] - mean_z_combined) *  (old_metrics[index_old,2] - mean_z_combined)
-            ) / (combined_metrics[index,9] + old_metrics[index_old, 9]) 
-
-        ## Combine mean
-
-        #x
-        combined_metrics[index,0] = mean_x_combined
-        #y
-        combined_metrics[index,1] = mean_y_combined
-        #z
-        combined_metrics[index,2] = mean_z_combined
+            ) / (combined_metrics[index,9] + old_metrics[index_old, 9])
 
         ## Combine other metrics
         combined_metrics[index,9] = combined_metrics[index,9] + old_metrics[index_old, 9]
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
-        combined_min_height[index] = min(combined_min_height[index],old_min_height[index_old])
+        combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
 
     @staticmethod
     @cuda.jit
