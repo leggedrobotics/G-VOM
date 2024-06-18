@@ -995,7 +995,7 @@ class Gsvom:
                     is_label_identical = False
                     break
             if not is_label_identical:
-                if old_label_votes[index_old] > combined_label_votes[index]:
+                if old_label_votes[index_old] >= combined_label_votes[index]:
                     combined_label_votes[index] = old_label_votes[index_old]
                     for dim_id in range(label_size):
                         combined_labels[index, dim_id] = old_labels[index_old, dim_id]
