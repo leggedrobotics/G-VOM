@@ -150,12 +150,21 @@ class Gsvom:
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
         
         ###### Paint the pointcloud ######
+        point_paint_start_event = cuda.event()
+        point_paint_end_event = cuda.event()
+        point_paint_start_event.record()
+
         point_labels = cuda.device_array([point_count, self.label_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_labels, 0, point_count,
                                                                           self.label_length)
 
         self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
                                                                            world_to_camera, image_width, image_height, point_labels)
+
+        point_paint_end_event.record()
+        point_paint_end_event.synchronize()
+        point_paint_time = cuda.event_elapsed_time(point_paint_start_event, point_paint_end_event)
+        print(f"Point painting took: {point_paint_time} ms")
         
         ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
@@ -189,6 +198,10 @@ class Gsvom:
         self.__move_data[blocks_map, self.threads_per_block](tmp_total_count, total_count, index_map, self.voxel_count)
 
         ###### Pick a semantic label for each voxel ######
+        vox_paint_start_event = cuda.event()
+        vox_paint_end_event = cuda.event()
+        vox_paint_start_event.record()
+
         # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
         max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
         self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
@@ -219,6 +232,11 @@ class Gsvom:
                                                                                          hit_count, cell_count_cpu, unique_labels,
                                                                                          unique_label_votes, voxel_labels,
                                                                                          voxel_label_votes)
+
+        vox_paint_end_event.record()
+        vox_paint_end_event.synchronize()
+        vox_paint_time = cuda.event_elapsed_time(vox_paint_start_event, vox_paint_end_event)
+        print(f"Voxel painting took: {vox_paint_time} ms")
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -286,6 +304,10 @@ class Gsvom:
         self.combined_cell_count_cpu = combined_cell_count[0]
 
         ###### Combine the data ######
+        data_comb_start_event = cuda.event()
+        data_comb_end_event = cuda.event()
+        data_comb_start_event.record()
+
         blockspergrid_cell = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block))
         blockspergrid_cell_2d = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0]))
         blockspergrid_all_features_2d = int(math.ceil((self.buffer_size+1)*self.label_length / self.threads_per_block_2D[1]))
@@ -359,7 +381,16 @@ class Gsvom:
                                                                              self.last_combined_label_votes, self.xy_size,
                                                                              self.z_size, self.label_length)
 
+        data_comb_end_event.record()
+        data_comb_end_event.synchronize()
+        data_comb_time = cuda.event_elapsed_time(data_comb_start_event, data_comb_end_event)
+        print(f"Combining data took: {data_comb_time} ms")
+
         # Combine the semantic labels
+        label_comb_start_event = cuda.event()
+        label_comb_end_event = cuda.event()
+        label_comb_start_event.record()
+
         blockspergrid_feature_2D = int(math.ceil(self.label_length / self.threads_per_block_2D[1]))
         blockspergrid_features_2D = (blockspergrid_cell_2d, blockspergrid_feature_2D)
 
@@ -376,6 +407,11 @@ class Gsvom:
                                                                                 unique_label_stack_pointers, self.combined_labels,
                                                                                 self.combined_label_votes,
                                                                                 self.combined_cell_count_cpu, self.label_length)
+
+        label_comb_end_event.record()
+        label_comb_end_event.synchronize()
+        label_comb_time = cuda.event_elapsed_time(label_comb_start_event, label_comb_end_event)
+        print(f"Combining labels took: {label_comb_time} ms")
 
         # Store the current combined map as the last combined map for the next cycle
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
