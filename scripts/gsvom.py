@@ -287,9 +287,11 @@ class Gsvom:
 
         ###### Combine the data ######
         blockspergrid_cell = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block))
-        blockspergrid_cell_2D = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0]))
-        blockspergrid_feature_2D = int(math.ceil(self.label_length / self.threads_per_block_2D[1]))
-        blockspergrid_features_2D = (blockspergrid_cell_2D, blockspergrid_feature_2D)
+        blockspergrid_cell_2d = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0]))
+        blockspergrid_all_features_2d = int(math.ceil((self.buffer_size+1)*self.label_length / self.threads_per_block_2D[1]))
+        blockspergrid_all_features = (blockspergrid_cell_2d, blockspergrid_all_features_2d)
+        blockspergrid_all_maps_2d = int(math.ceil((self.buffer_size+1) / self.threads_per_block_2D[1]))
+        blockspergrid_all_maps = (blockspergrid_cell_2d, blockspergrid_all_maps_2d)
 
         self.combined_hit_count = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
         self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_hit_count, 0, self.combined_cell_count_cpu)
@@ -302,15 +304,21 @@ class Gsvom:
         self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_min_height, 1,
                                                                          self.combined_cell_count_cpu)
 
-        self.combined_labels = cuda.device_array([self.combined_cell_count_cpu, self.label_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
-                                                                                   self.combined_cell_count_cpu, self.label_length)
-
-        self.combined_label_votes = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_label_votes, 0, self.combined_cell_count_cpu)
+        unique_labels = cuda.device_array([self.combined_cell_count_cpu, (self.buffer_size+1)*self.label_length],
+                                                dtype=np.float32)
+        self.__init_2D_array[blockspergrid_all_features, self.threads_per_block_2D](unique_labels, 0,
+                                                                                   self.combined_cell_count_cpu,
+                                                                                   (self.buffer_size+1)*self.label_length)
+        unique_label_votes = cuda.device_array([self.combined_cell_count_cpu, (self.buffer_size+1)], dtype=np.int32)
+        self.__init_2D_array[blockspergrid_all_maps, self.threads_per_block_2D](unique_label_votes, 0,
+                                                                                self.combined_cell_count_cpu,
+                                                                                (self.buffer_size + 1))
+        unique_label_stack_pointers = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
+        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](unique_label_stack_pointers, 0,
+                                                                         self.combined_cell_count_cpu)
 
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
-        blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_metric_2D)
+        blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_metric_2D)
 
         self.combined_metrics = cuda.device_array([self.combined_cell_count_cpu, self.metrics_count], dtype=np.float32)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.combined_metrics, 0, self.combined_cell_count_cpu,
@@ -325,8 +333,8 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels,
-                                                                             self.combined_label_votes,
+                                                                             unique_labels, unique_label_votes,
+                                                                             unique_label_stack_pointers,
                                                                              self.metrics_buffer[i], self.hit_count_buffer[i],
                                                                              self.total_count_buffer[i], self.min_height_buffer[i],
                                                                              self.index_buffer[i], self.origin_buffer[i],
@@ -339,8 +347,8 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels,
-                                                                             self.combined_label_votes,
+                                                                             unique_labels, unique_label_votes,
+                                                                             unique_label_stack_pointers,
                                                                              self.last_combined_metrics,
                                                                              self.last_combined_hit_count,
                                                                              self.last_combined_total_count,
@@ -351,6 +359,25 @@ class Gsvom:
                                                                              self.last_combined_label_votes, self.xy_size,
                                                                              self.z_size, self.label_length)
 
+        # Combine the semantic labels
+        blockspergrid_feature_2D = int(math.ceil(self.label_length / self.threads_per_block_2D[1]))
+        blockspergrid_features_2D = (blockspergrid_cell_2d, blockspergrid_feature_2D)
+
+        self.combined_labels = cuda.device_array([self.combined_cell_count_cpu, self.label_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
+                                                                                   self.combined_cell_count_cpu,
+                                                                                   self.label_length)
+
+        self.combined_label_votes = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
+        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_label_votes, 0,
+                                                                         self.combined_cell_count_cpu)
+
+        self.__combine_voxel_labels[blockspergrid_cell, self.threads_per_block](unique_labels, unique_label_votes,
+                                                                                unique_label_stack_pointers, self.combined_labels,
+                                                                                self.combined_label_votes,
+                                                                                self.combined_cell_count_cpu, self.label_length)
+
+        # Store the current combined map as the last combined map for the next cycle
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
         self.last_combined_hit_count = self.combined_hit_count
         self.last_combined_total_count = self.combined_total_count
@@ -361,10 +388,13 @@ class Gsvom:
         self.last_combined_labels = self.combined_labels
         self.last_combined_label_votes = self.combined_label_votes
 
+        self.last_buffer_index = None
+        self.buffer_index = 0
+
         ###### Calculate eigenvalues for each voxel ######
-        blockspergrid_cell_2D = math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0])
+        blockspergrid_cell_2d = math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_eigenvalue_2D = math.ceil(3 / self.threads_per_block_2D[1])
-        blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_eigenvalue_2D)
+        blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_eigenvalue_2D)
 
         self.voxels_eigenvalues = cuda.device_array([self.combined_cell_count_cpu, 3], dtype=np.float32)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.voxels_eigenvalues, 0, self.combined_cell_count_cpu, 3)
@@ -966,8 +996,8 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __combine_metrics(combined_metrics, combined_hit_count,combined_total_count,combined_min_height, combined_index_map,
-                          combined_origin, combined_labels, combined_label_votes, old_metrics, old_hit_count, old_total_count,
+    def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
+                          combined_origin, unique_labels, unique_label_votes, label_stack_pointers, old_metrics, old_hit_count, old_total_count,
                           old_min_height, old_index_map, old_origin, old_labels, old_label_votes, xy_size, z_size, label_size):
         x, y, z = cuda.grid(3)
 
@@ -987,20 +1017,35 @@ class Gsvom:
         if index < 0 or index_old < 0:
             return
 
-        # Combine semantic labels
-        if old_label_votes[index_old] > 0:
-            is_label_identical = True
-            for dim_id in range(label_size):
-                if abs(old_labels[index_old, dim_id] - combined_labels[index, dim_id]) > 1e-7:
-                    is_label_identical = False
+        # Identify unique semantic labels
+        cur_label = old_labels[index_old]
+        is_zero = True
+        for dim_id in range(label_size):
+            if abs(cur_label[dim_id]) > 1e-7:
+                is_zero = False
+                break
+
+        if not is_zero:
+            num_unique_labels = label_stack_pointers[index]
+            is_unique = True
+            for ulabel_idx in range(num_unique_labels):
+                ulabel_start = ulabel_idx * label_size
+                all_match = True
+                for dim_id in range(label_size):
+                    if abs(cur_label[dim_id] - unique_labels[index, ulabel_start + dim_id]) > 1e-7:
+                        all_match = False
+                        break
+                if all_match:
+                    unique_label_votes[index, ulabel_idx] += old_label_votes[index_old]
+                    is_unique = False
                     break
-            if not is_label_identical:
-                if old_label_votes[index_old] >= combined_label_votes[index]:
-                    combined_label_votes[index] = old_label_votes[index_old]
-                    for dim_id in range(label_size):
-                        combined_labels[index, dim_id] = old_labels[index_old, dim_id]
-            else:
-                cuda.atomic.add(combined_label_votes, index, old_label_votes[index_old])
+
+            if is_unique:
+                unique_l_start = num_unique_labels * label_size
+                for dim_id in range(label_size):
+                    unique_labels[index, unique_l_start + dim_id] = cur_label[dim_id]
+                unique_label_votes[index, num_unique_labels] = old_label_votes[index_old]
+                label_stack_pointers[index] += 1
 
         ## Combine mean
         # x
@@ -1054,6 +1099,28 @@ class Gsvom:
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
         combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
+
+    @staticmethod
+    @cuda.jit
+    def __combine_voxel_labels(unique_labels, unique_label_votes, unique_label_stack_pointers, combined_labels, combined_label_votes,
+                             voxel_count, label_size):
+        i = cuda.grid(1)
+        if i >= voxel_count:
+            return
+
+        num_unique_labels = unique_label_stack_pointers[i]
+        max_num_votes = 0
+        max_label_id = -1
+        for label_id in range(num_unique_labels):
+            if unique_label_votes[i, label_id] > max_num_votes:
+                max_num_votes = unique_label_votes[i, label_id]
+                max_label_id = label_id
+
+        if max_label_id >= 0:
+            combined_label_votes[i] = max_num_votes
+            max_label_start_id = max_label_id*label_size
+            for dim_id in range(label_size):
+                combined_labels[i, dim_id] = unique_labels[i, max_label_start_id + dim_id]
 
     @staticmethod
     @cuda.jit
