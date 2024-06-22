@@ -1588,22 +1588,34 @@ class Gsvom:
         pt_y_w = pointcloud[i, 1]
         pt_z_w = pointcloud[i, 2]
 
-        pt_x_cam = extrinsic_matrix[0, 0]*pt_x_w + extrinsic_matrix[0, 1]*pt_y_w + extrinsic_matrix[0, 2]*pt_z_w + extrinsic_matrix[0, 3]
-        pt_y_cam = extrinsic_matrix[1, 0]*pt_x_w + extrinsic_matrix[1, 1]*pt_y_w + extrinsic_matrix[1, 2]*pt_z_w + extrinsic_matrix[1, 3]
-        pt_z_cam = extrinsic_matrix[2, 0]*pt_x_w + extrinsic_matrix[2, 1]*pt_y_w + extrinsic_matrix[2, 2]*pt_z_w + extrinsic_matrix[2, 3]
+        # Transform point to camera coordinate frame
+        pt_x_cam = extrinsic_matrix[0, 0] * pt_x_w + extrinsic_matrix[0, 1] * pt_y_w + extrinsic_matrix[0, 2] * pt_z_w + \
+                   extrinsic_matrix[0, 3]
+        pt_y_cam = extrinsic_matrix[1, 0] * pt_x_w + extrinsic_matrix[1, 1] * pt_y_w + extrinsic_matrix[1, 2] * pt_z_w + \
+                   extrinsic_matrix[1, 3]
+        pt_z_cam = extrinsic_matrix[2, 0] * pt_x_w + extrinsic_matrix[2, 1] * pt_y_w + extrinsic_matrix[2, 2] * pt_z_w + \
+                   extrinsic_matrix[2, 3]
         # Make sure the point is in front of the camera
         if pt_z_cam <= 0:
             return
-        
-        px_x = intrinsic_matrix[0, 0]*pt_x_cam + intrinsic_matrix[0, 1]*pt_y_cam + intrinsic_matrix[0, 2]*pt_z_cam
-        px_y = intrinsic_matrix[1, 0]*pt_x_cam + intrinsic_matrix[1, 1]*pt_y_cam + intrinsic_matrix[1, 2]*pt_z_cam
-        px_z = intrinsic_matrix[2, 0]*pt_x_cam + intrinsic_matrix[2, 1]*pt_y_cam + intrinsic_matrix[2, 2]*pt_z_cam
-        px_x = int(round(px_x/px_z))
-        px_y = int(round(px_y/px_z))
-        # Make sure the point is projected within the image bounds
+
+        # Project the point to the image plane
+        pt_x_image = pt_x_cam / pt_z_cam
+        pt_y_image = pt_y_cam / pt_z_cam
+
+        # Map the point into pixel coordinates
+        # WARNING: This operation assumes the intrinsic camera matrix has this format:
+        #          fx  0  cx
+        #          0   fy cy
+        #          0   0  1
+        px_x = intrinsic_matrix[0, 0] * pt_x_image + intrinsic_matrix[0, 2]
+        px_y = intrinsic_matrix[1, 1] * pt_y_image + intrinsic_matrix[1, 2]
+        px_x = int(round(px_x))
+        px_y = int(round(px_y))
+        # Make sure the point is within the image bounds
         if px_x < 0 or px_x >= image_width or px_y < 0 or px_y >= image_height:
             return
-        
+
         # Extract the semantic label (for now it is just the color)
         for channel in range(3):
             labels[i, channel] = image[px_x, px_y, channel]
