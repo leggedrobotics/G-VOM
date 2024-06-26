@@ -21,8 +21,8 @@ class VoxelMapper:
         self.tf_transformer = tf.TransformerROS()
 
         self.odom_frame = rospy.get_param("~odom_frame", "odom")
-        self.xy_resolution = rospy.get_param("~xy_resolution", 0.20)
-        self.z_resolution = rospy.get_param("~z_resolution", 0.2)
+        self.xy_resolution = rospy.get_param("~xy_resolution", 0.15)
+        self.z_resolution = rospy.get_param("~z_resolution", 0.15)
         self.width = rospy.get_param("~width", 256)
         self.height = rospy.get_param("~height", 64)
         self.buffer_size = rospy.get_param("~buffer_size", 4)

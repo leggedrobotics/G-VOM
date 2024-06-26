@@ -989,7 +989,7 @@ class Gvom:
                         (z + dz) * xy_size * xy_size)
 
         # If there is no data in the combined map and an occpuied voexl in the new map
-        if((old_index_map[index_old]) >= 0 and (combined_index_map[index] <= -1) and (combined_index_map[index] >= -11)):
+        if((old_index_map[index_old]) >= 0 and (combined_index_map[index] <= -1) and (combined_index_map[index] >= -16)):
             combined_index_map[index] = cuda.atomic.add(combined_cell_count, 0, 1)
 
         # if there is an empty cell in the old map and no data or empty data in the new map
