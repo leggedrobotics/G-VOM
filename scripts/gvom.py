@@ -24,11 +24,14 @@ class Gvom:
     slope_distance_threshold:       How steep does a slope have to be to count as a positive obstacle
     robot_height:                   The height of the robot (overhangs higher than this do not count as obstacles)
     robot_radius:                   Radius of the area which counts as the robot for height map calculation
+    ground_to_lidar_height:         The distance from the ground to the lidar, used to fill in the ground
+    xy_einge_dist, z_eigen_dist:    The distances around a voxel used to calculate its metrics
+    removal_constant1 and 2:        The constants to calculate empty voxel removal threshold = k1/(r-k2)**2
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist):
+                 xy_eigen_dist, z_eigen_dist, removal_constant1, removal_constant2):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -45,10 +48,13 @@ class Gvom:
         self.ground_to_lidar_height = ground_to_lidar_height
 
         # When calculating covariance eigenvalues all points in voxels within a radius of [xy_eigen_dist] in xy and [z_eigen_dist]
-        # in z voxels will be used
-        self.xy_eigen_dist = xy_eigen_dist
+        # in z voxels will be used.
         # This radius is in number of voxels, ie r = 0 -> just points within the voxel, r=1 a 3x3 voxel cube centered on the voxel
+        self.xy_eigen_dist = xy_eigen_dist
         self.z_eigen_dist = z_eigen_dist
+
+        self.voxel_removal_k1 = removal_constant1
+        self.voxel_removal_k2 = removal_constant2
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -211,9 +217,10 @@ class Gvom:
             # If previous merged map exists, combine it too
             self.__combine_old_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
                                                                                  self.combined_origin,
-                                                                                 self.last_combined_index_map, self.voxel_count,
+                                                                                 self.last_combined_index_map,
                                                                                  self.last_combined_origin, self.xy_size,
-                                                                                 self.z_size)
+                                                                                 self.z_size, self.voxel_removal_k1,
+                                                                                 self.voxel_removal_k2)
         self.combined_cell_count_cpu = combined_cell_count[0]
 
         ###### Combine the data ######
@@ -969,7 +976,8 @@ class Gvom:
 
     @staticmethod
     @cuda.jit
-    def __combine_old_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, voxel_count, old_origin, xy_size, z_size):
+    def __combine_old_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size,
+                              z_size, removal_k1, removal_k2):
         x, y, z = cuda.grid(3)
         if x >= xy_size or y >= xy_size or z >= z_size:
             return
@@ -989,9 +997,7 @@ class Gvom:
         dist_to_robot_y = y - xy_size/2
         dist_to_robot_z = z - z_size/2
         r = (dist_to_robot_x**2 + dist_to_robot_y**2 + dist_to_robot_z**2)**0.5
-
-        k1, k2 = (7200, 8)
-        threshold = -1 - k1/(r - k2)**2
+        threshold = -1 - removal_k1 / (r - removal_k2) ** 2
 
         # If there is no data in the combined map and an occpuied voexl in the new map
         if old_index_map[index_old] >= 0 and combined_index_map[index] <= -1 and combined_index_map[index] >= threshold:

@@ -37,26 +37,17 @@ class VoxelMapper:
         self.robot_radius = rospy.get_param("~robot_radius", 1.0)
         self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.5)
         self.freq = rospy.get_param("~freq", 10.) # Hz
-        self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist",2)
-        self.z_eigen_dist = rospy.get_param("~z_eigen_dist",2)
+        self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist", 2)
+        self.z_eigen_dist = rospy.get_param("~z_eigen_dist", 2)
+        self.voxel_removal_k1 = rospy.get_param("~voxel_removal_k1", 7200)
+        self.voxel_removal_k2 = rospy.get_param("~voxel_removal_k2", 8)
+
         
-        
-        self.voxel_mapper = gvom.Gvom(
-            self.xy_resolution,
-            self.z_resolution,
-            self.width,
-            self.height,
-            self.buffer_size,
-            self.min_point_distance,
-            self.positive_obstacle_threshold,
-            self.negative_obstacle_threshold,
-            self.slope_obsacle_threshold,
-            self.robot_height,
-            self.robot_radius,
-            self.ground_to_lidar_height,
-            self.xy_eigen_dist,
-            self.z_eigen_dist
-        )
+        self.voxel_mapper = gvom.Gvom(self.xy_resolution, self.z_resolution, self.width, self.height, self.buffer_size,
+                                      self.min_point_distance, self.positive_obstacle_threshold, self.negative_obstacle_threshold,
+                                      self.slope_obsacle_threshold, self.robot_height, self.robot_radius,
+                                      self.ground_to_lidar_height, self.xy_eigen_dist, self.z_eigen_dist, self.voxel_removal_k1,
+                                      self.voxel_removal_k2)
 
         self.sub_cloud = rospy.Subscriber("/point_cloud_filter/lidar/point_cloud_filtered", PointCloud2, self.cb_lidar,queue_size=1)
         self.sub_odom = rospy.Subscriber("/state_estimator/odometry", Odometry, self.cb_odom,queue_size=1)
