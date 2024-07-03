@@ -971,29 +971,34 @@ class Gvom:
     @cuda.jit
     def __combine_old_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, voxel_count, old_origin, xy_size, z_size):
         x, y, z = cuda.grid(3)
-
-        if(x >= xy_size or y >= xy_size or z >= z_size):
-            #print("bad index")
+        if x >= xy_size or y >= xy_size or z >= z_size:
             return
 
         dx = combined_origin[0] - old_origin[0]
         dy = combined_origin[1] - old_origin[1]
         dz = combined_origin[2] - old_origin[2]
 
-        if((x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0):
-            # print("oob")
+        if (x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0:
             return
 
         index = int(x + y * xy_size + z * xy_size * xy_size)
-        index_old = int((x + dx) + (y + dy) * xy_size +
-                        (z + dz) * xy_size * xy_size)
+        index_old = int((x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)
+
+        # Calculate the old voxel removal threshold
+        dist_to_robot_x = x - xy_size/2
+        dist_to_robot_y = y - xy_size/2
+        dist_to_robot_z = z - z_size/2
+        r = (dist_to_robot_x**2 + dist_to_robot_y**2 + dist_to_robot_z**2)**0.5
+
+        k1, k2 = (7200, 8)
+        threshold = -1 - k1/(r - k2)**2
 
         # If there is no data in the combined map and an occpuied voexl in the new map
-        if((old_index_map[index_old]) >= 0 and (combined_index_map[index] <= -1) and (combined_index_map[index] >= -16)):
+        if old_index_map[index_old] >= 0 and combined_index_map[index] <= -1 and combined_index_map[index] >= threshold:
             combined_index_map[index] = cuda.atomic.add(combined_cell_count, 0, 1)
 
         # if there is an empty cell in the old map and no data or empty data in the new map
-        elif(old_index_map[index_old] < -1 and combined_index_map[index] <= -1):
+        elif old_index_map[index_old] < -1 and combined_index_map[index] <= -1:
             combined_index_map[index] += old_index_map[index_old] + 1
 
     @staticmethod
