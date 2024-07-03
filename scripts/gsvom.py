@@ -107,7 +107,8 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix):
+    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix,
+                     distortion_params):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -124,6 +125,7 @@ class Gsvom:
         image_height = image.shape[1]
         image = cuda.to_device(image)
         projection_matrix = cuda.to_device(projection_matrix)
+        distortion_params = cuda.to_device(distortion_params)
         world_to_camera = cuda.to_device(world_to_camera)
 
         blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
@@ -155,7 +157,8 @@ class Gsvom:
                                                                           self.label_length)
 
         self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
-                                                                           world_to_camera, image_width, image_height, point_labels)
+                                                                           distortion_params, world_to_camera, image_width,
+                                                                           image_height, point_labels)
         
         ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
@@ -1579,7 +1582,8 @@ class Gsvom:
     
     @staticmethod
     @cuda.jit
-    def __paint_pointcloud(pointcloud, point_count, image, intrinsic_matrix, extrinsic_matrix, image_width, image_height, labels):
+    def __paint_pointcloud(pointcloud, point_count, image, intrinsic_matrix, distortion_params, extrinsic_matrix, image_width,
+                           image_height, labels):
         i = cuda.grid(1)
         if i >= point_count:
             return
@@ -1588,22 +1592,45 @@ class Gsvom:
         pt_y_w = pointcloud[i, 1]
         pt_z_w = pointcloud[i, 2]
 
-        pt_x_cam = extrinsic_matrix[0, 0]*pt_x_w + extrinsic_matrix[0, 1]*pt_y_w + extrinsic_matrix[0, 2]*pt_z_w + extrinsic_matrix[0, 3]
-        pt_y_cam = extrinsic_matrix[1, 0]*pt_x_w + extrinsic_matrix[1, 1]*pt_y_w + extrinsic_matrix[1, 2]*pt_z_w + extrinsic_matrix[1, 3]
-        pt_z_cam = extrinsic_matrix[2, 0]*pt_x_w + extrinsic_matrix[2, 1]*pt_y_w + extrinsic_matrix[2, 2]*pt_z_w + extrinsic_matrix[2, 3]
+        # Transform point to camera coordinate frame
+        pt_x_cam = extrinsic_matrix[0, 0] * pt_x_w + extrinsic_matrix[0, 1] * pt_y_w + extrinsic_matrix[0, 2] * pt_z_w + \
+                   extrinsic_matrix[0, 3]
+        pt_y_cam = extrinsic_matrix[1, 0] * pt_x_w + extrinsic_matrix[1, 1] * pt_y_w + extrinsic_matrix[1, 2] * pt_z_w + \
+                   extrinsic_matrix[1, 3]
+        pt_z_cam = extrinsic_matrix[2, 0] * pt_x_w + extrinsic_matrix[2, 1] * pt_y_w + extrinsic_matrix[2, 2] * pt_z_w + \
+                   extrinsic_matrix[2, 3]
         # Make sure the point is in front of the camera
         if pt_z_cam <= 0:
             return
-        
-        px_x = intrinsic_matrix[0, 0]*pt_x_cam + intrinsic_matrix[0, 1]*pt_y_cam + intrinsic_matrix[0, 2]*pt_z_cam
-        px_y = intrinsic_matrix[1, 0]*pt_x_cam + intrinsic_matrix[1, 1]*pt_y_cam + intrinsic_matrix[1, 2]*pt_z_cam
-        px_z = intrinsic_matrix[2, 0]*pt_x_cam + intrinsic_matrix[2, 1]*pt_y_cam + intrinsic_matrix[2, 2]*pt_z_cam
-        px_x = int(round(px_x/px_z))
-        px_y = int(round(px_y/px_z))
-        # Make sure the point is projected within the image bounds
+
+        # Project the point to the image plane
+        pt_x_image = pt_x_cam / pt_z_cam
+        pt_y_image = pt_y_cam / pt_z_cam
+
+        # Account for camera distortion
+        r2 = pt_x_image**2 + pt_y_image**2
+
+        k1 = distortion_params[0]
+        k2 = distortion_params[1]
+        p1 = distortion_params[2]
+        p2 = distortion_params[3]
+
+        x_dist = pt_x_image * (1 + k1 * r2 + k2 * r2 ** 2) + 2 * p1 * pt_x_image * pt_y_image + p2 * (r2 + 2 * pt_x_image ** 2)
+        y_dist = pt_y_image * (1 + k1 * r2 + k2 * r2 ** 2) + 2 * p2 * pt_x_image * pt_y_image + p1 * (r2 + 2 * pt_y_image ** 2)
+
+        # Map the point into pixel coordinates
+        # WARNING: This operation assumes the intrinsic camera matrix has this format:
+        #          fx  0  cx
+        #          0   fy cy
+        #          0   0  1
+        px_x = intrinsic_matrix[0, 0] * x_dist + intrinsic_matrix[0, 2]
+        px_y = intrinsic_matrix[1, 1] * y_dist + intrinsic_matrix[1, 2]
+        px_x = int(round(px_x))
+        px_y = int(round(px_y))
+        # Make sure the point is within the image bounds
         if px_x < 0 or px_x >= image_width or px_y < 0 or px_y >= image_height:
             return
-        
+
         # Extract the semantic label (for now it is just the color)
         for channel in range(3):
             labels[i, channel] = image[px_x, px_y, channel]
