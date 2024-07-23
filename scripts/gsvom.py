@@ -27,11 +27,12 @@ class Gsvom:
     ground_to_lidar_height:         Distance between the ground and the LiDAR, used to fill in height information around the robot
     xy_eigen_dist:                  The number of voxels in the xy directions used to calculate eigen values of point distribution and surface slope
     z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
+    label_length                    The dimension of the semantic label used
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist):
+                 xy_eigen_dist, z_eigen_dist, label_length):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -53,7 +54,7 @@ class Gsvom:
         # This radius is in number of voxels, ie r = 0 -> just points within the voxel, r=1 a 3x3 voxel cube centered on the voxel
         self.z_eigen_dist = z_eigen_dist
 
-        self.label_length = 1 # The number of dimensions of the semantic features (for now it is just the RGB value)
+        self.label_length = label_length
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
