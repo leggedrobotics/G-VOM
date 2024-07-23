@@ -276,8 +276,7 @@ class Gsvom:
                 continue
             self.__combine_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
                                                                              self.combined_origin, self.index_buffer[i],
-                                                                             self.voxel_count, self.origin_buffer[i],
-                                                                             self.xy_size, self.z_size)
+                                                                             self.origin_buffer[i], self.xy_size, self.z_size)
             self.semaphores[i].release()
 
         if not self.last_combined_origin is None:
@@ -480,26 +479,26 @@ class Gsvom:
         return occupancy_grid
 
     def get_map_as_painted_occupancy_pointcloud(self):
-        """ Returns a point and a label (color) for each occupied cell in the last occupancy map"""
-        # TODO: Switch these to the combined values
-        lookup_table = self.combined_index_map.copy_to_host()
-        origin = self.combined_origin.copy_to_host()
-        label_array = self.combined_labels.copy_to_host()
-        points = []
-        labels = []
-        for x_ind in range(self.xy_size):
-            for y_ind in range(self.xy_size):
-                for z_ind in range(self.z_size):
-                    index = x_ind + y_ind*self.xy_size + z_ind*self.xy_size*self.xy_size
-                    if lookup_table[index] >= 0:
-                        x = (origin[0] + x_ind + 0.5)*self.xy_resolution
-                        y = (origin[1] + y_ind + 0.5)*self.xy_resolution
-                        z = (origin[2] + z_ind + 0.5)*self.z_resolution
-                        points.append([x, y, z])
-                        voxel_label = label_array[lookup_table[index]]
-                        labels.append(voxel_label)
-        points = np.array(points)
-        labels = np.array(labels)
+        """ Returns a point and a label for each occupied cell in the combined occupancy map"""
+        occupied_cell_count = self.combined_cell_count_cpu
+        out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
+        out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=float))
+        buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
+
+        blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
+        blockspergrid_z = math.ceil(self.z_size / self.threads_per_block_3D[2])
+        blockspergrid = (blockspergrid_xy, blockspergrid_xy, blockspergrid_z)
+        self.__make_debug_painted_occupancy_pointcloud[blockspergrid, self.threads_per_block_3D](self.combined_index_map,
+                                                                                                 self.combined_labels,
+                                                                                                 self.combined_origin,
+                                                                                                 self.xy_size, self.z_size,
+                                                                                                 self.xy_resolution,
+                                                                                                 self.z_resolution,
+                                                                                                 self.label_length, buffer_index,
+                                                                                                 out_points, out_labels)
+
+        points = out_points.copy_to_host()
+        labels = out_labels.copy_to_host()
         return points, labels
 
     def make_debug_voxel_map(self):
@@ -613,6 +612,30 @@ class Gsvom:
             output_voxel_map[index, 7] = eigenvalues[index,2]
             #if(d1 > 0.0) and (d2 > 0.0):
             #    output_voxel_map[index, 7] = math.log10(d1/d2)
+
+    @staticmethod
+    @cuda.jit
+    def __make_debug_painted_occupancy_pointcloud(index_map, label_buffer, origin, xy_size, z_size, xy_resolution, z_resolution,
+                                                  label_length, out_buffer_index, out_points, out_labels):
+        x_ind, y_ind, z_ind = cuda.grid(3)
+        if x_ind >= xy_size or y_ind >= xy_size or z_ind >= z_size:
+            return
+
+        cell_index = int(x_ind + y_ind*xy_size + z_ind*xy_size*xy_size)
+        if index_map[cell_index] < 0:
+            return
+
+        x = (origin[0] + x_ind + 0.5) * xy_resolution
+        y = (origin[1] + y_ind + 0.5) * xy_resolution
+        z = (origin[2] + z_ind + 0.5) * z_resolution
+
+        output_index = cuda.atomic.add(out_buffer_index, 0, 1)
+        out_points[output_index, 0] = x
+        out_points[output_index, 1] = y
+        out_points[output_index, 2] = z
+
+        for channel in range(label_length):
+            out_labels[output_index, channel] = label_buffer[index_map[cell_index], channel]
 
     @staticmethod
     @cuda.jit
@@ -1155,19 +1178,17 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __combine_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, voxel_count, old_origin, xy_size, z_size):
+    def __combine_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size, z_size):
         x, y, z = cuda.grid(3)
 
-        if(x >= xy_size or y >= xy_size or z >= z_size):
-            #print("bad index")
+        if x >= xy_size or y >= xy_size or z >= z_size:
             return
 
         dx = combined_origin[0] - old_origin[0]
         dy = combined_origin[1] - old_origin[1]
         dz = combined_origin[2] - old_origin[2]
 
-        if((x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0):
-            # print("oob")
+        if (x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0:
             return
 
         index = int(x + y * xy_size + z * xy_size * xy_size)
@@ -1175,11 +1196,11 @@ class Gsvom:
                         (z + dz) * xy_size * xy_size)
 
         # If there is no data or empty data in the combined map and an occpuied voexl in the new map
-        if(old_index_map[index_old] >= 0 and combined_index_map[index] <= -1):
+        if old_index_map[index_old] >= 0 and combined_index_map[index] <= -1:
             combined_index_map[index] = cuda.atomic.add(combined_cell_count, 0, 1)
 
-        # if there is an empty cell in the old map and no data or empty data in the new map
-        elif(old_index_map[index_old] < -1 and combined_index_map[index] <= -1):
+        # If there is an empty cell in the old map and no data or empty data in the new map
+        elif old_index_map[index_old] < -1 and combined_index_map[index] <= -1:
             combined_index_map[index] += old_index_map[index_old] + 1
 
     @staticmethod
