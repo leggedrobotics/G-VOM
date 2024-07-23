@@ -53,7 +53,7 @@ class Gsvom:
         # This radius is in number of voxels, ie r = 0 -> just points within the voxel, r=1 a 3x3 voxel cube centered on the voxel
         self.z_eigen_dist = z_eigen_dist
 
-        self.label_length = 3 # The number of dimensions of the semantic features (for now it is just the RGB value)
+        self.label_length = 1 # The number of dimensions of the semantic features (for now it is just the RGB value)
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -158,7 +158,7 @@ class Gsvom:
 
         self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
                                                                            distortion_params, world_to_camera, image_width,
-                                                                           image_height, point_labels)
+                                                                           image_height, point_labels, self.label_length)
         
         ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
@@ -1583,7 +1583,7 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __paint_pointcloud(pointcloud, point_count, image, intrinsic_matrix, distortion_params, extrinsic_matrix, image_width,
-                           image_height, labels):
+                           image_height, labels, label_length):
         i = cuda.grid(1)
         if i >= point_count:
             return
@@ -1631,8 +1631,8 @@ class Gsvom:
         if px_x < 0 or px_x >= image_width or px_y < 0 or px_y >= image_height:
             return
 
-        # Extract the semantic label (for now it is just the color)
-        for channel in range(3):
+        # Extract the semantic label
+        for channel in range(label_length):
             labels[i, channel] = image[px_x, px_y, channel]
     
     @staticmethod
