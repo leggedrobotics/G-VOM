@@ -214,12 +214,9 @@ class Gsvom:
         voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu,
                                                                           self.label_length)
-        voxel_label_votes = cuda.device_array([cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blocks_semantic_assignment, self.threads_per_block](voxel_label_votes, 0, cell_count_cpu)
         self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](all_labels_per_voxel, self.label_length,
                                                                                          hit_count, cell_count_cpu, unique_labels,
-                                                                                         unique_label_votes, voxel_labels,
-                                                                                         voxel_label_votes)
+                                                                                         unique_label_votes, voxel_labels)
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -1597,7 +1594,7 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __assign_label_to_voxel(all_labels_in_voxel, label_size, hit_counts, voxel_count, unique_labels, unique_label_votes,
-                                voxel_labels, label_votes):
+                                out_voxel_labels):
         i = cuda.grid(1)
         if i >= voxel_count:
             return
@@ -1642,11 +1639,10 @@ class Gsvom:
             if unique_label_votes[i, label_idx] > max_num_votes:
                 max_num_votes = unique_label_votes[i, label_idx]
                 max_index = label_idx
-        label_votes[i] = max_num_votes
         best_label_start = max_index*label_size
         if best_label_start >= 0:
             for dim_id in range(label_size):
-                voxel_labels[i, dim_id] = unique_labels[i, best_label_start + dim_id]
+                out_voxel_labels[i, dim_id] = unique_labels[i, best_label_start + dim_id]
     
     @staticmethod
     @cuda.jit
