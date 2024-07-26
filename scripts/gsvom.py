@@ -55,7 +55,7 @@ class Gsvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.label_length = label_length
-        self.max_unique_labels = 512  # The maximum allowed number of unique labels. A HACK to prevent running out of memory
+        self.max_num_of_label_voting_points = 512  # The maximum allowed number of points that will be used to vote on a voxel label.
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -194,33 +194,33 @@ class Gsvom:
         # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
         max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
         self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
-        max_number_hits_cpu = max_number_hits.copy_to_host()[0]
+        max_num_of_voting_points = min(max_number_hits.copy_to_host()[0], self.max_num_of_label_voting_points)
         # Associate point labels with voxels
-        label_indexes_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu], dtype=np.int32))
-        voxel_stack_pointers = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
+        label_indexes_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
+        nums_painted_points = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
         self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](pointcloud, point_count,
                                                                                               self.xy_resolution, self.xy_size,
                                                                                               self.z_resolution, self.z_size,
                                                                                               origin, index_map,
-                                                                                              voxel_stack_pointers,
+                                                                                              max_num_of_voting_points,
+                                                                                              nums_painted_points,
                                                                                               label_indexes_per_voxel)
         # Find the label for each voxel
         blocks_semantic_assignment = int(np.ceil(cell_count_cpu / self.threads_per_block))
         blockspergrid_cell_2D = math.ceil(cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_feature_2D)
         # Here the unique label arrays are a hack to have arrays with parametrized size inside the cuda kernel, they are needed only inside
-        max_num_unique_labels = min(max_number_hits_cpu, self.max_unique_labels) # A HACK to prevent running out of memory by limiting the size of the unique label array
-        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_num_unique_labels], dtype=np.int32))
-        unique_label_indexes = cuda.to_device(np.zeros([cell_count_cpu, max_num_unique_labels], dtype=np.int32))
+        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
+        unique_label_indexes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
 
         voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu,
                                                                           self.label_length)
         self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](label_indexes_per_voxel, point_labels,
-                                                                                         self.label_length, hit_count,
+                                                                                         self.label_length, nums_painted_points,
                                                                                          cell_count_cpu, unique_label_indexes,
                                                                                          unique_label_votes,
-                                                                                         max_num_unique_labels, voxel_labels)
+                                                                                         max_num_of_voting_points, voxel_labels)
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -1570,7 +1570,7 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __aggregate_semantic_labels_in_voxels(points, point_count, xy_resolution, xy_size, z_resolution, z_size, origin, index_map,
-                                              stack_pointers, out_all_label_indexes_in_voxel):
+                                              max_num_of_voting_points, out_num_colored_points, out_all_label_indexes_in_voxel):
         i = cuda.grid(1)
         if i >= point_count:
             return
@@ -1586,23 +1586,24 @@ class Gsvom:
         if z_index < 0 or z_index >= z_size:
             return
 
-        # Put the label at the top of the voxel's stack
+        # Put the label at the top of the voxel's stack, if the stack is not full
         voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
         buffer_index = index_map[voxel_index]
-        stack_index = cuda.atomic.add(stack_pointers, buffer_index, 1)
-        out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
+        if out_num_colored_points[buffer_index] < max_num_of_voting_points:
+            stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+            out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
     
     @staticmethod
     @cuda.jit
-    def __assign_label_to_voxel(label_indexes_in_voxel, point_labels, label_size, hit_counts, voxel_count, unique_label_indexes,
-                                unique_label_votes, max_num_unique_labels, out_voxel_labels):
+    def __assign_label_to_voxel(label_indexes_in_voxel, point_labels, label_size, colored_point_counts, occupied_voxel_count,
+                                unique_label_indexes, unique_label_votes, max_num_unique_labels, out_voxel_labels):
         i = cuda.grid(1)
-        if i >= voxel_count:
+        if i >= occupied_voxel_count:
             return
 
         label_indexes = label_indexes_in_voxel[i]
         num_unique_labels = 0
-        for point_idx in range(hit_counts[i]):
+        for point_idx in range(colored_point_counts[i]):
             label = point_labels[label_indexes[point_idx]]
 
             is_zero = True
