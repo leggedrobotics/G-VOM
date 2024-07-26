@@ -312,7 +312,7 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.combined_metrics, 0, self.combined_cell_count_cpu,
                                                                          self.metrics_count)
 
-        for i in range(0, self.buffer_size):
+        for i in range(self.buffer_size-1, -1, -1):
             # Combine maps currently in the buffer
             self.semaphores[i].acquire()
             if self.origin_buffer[i] is None:
@@ -1005,6 +1005,17 @@ class Gsvom:
         index_old = old_index_map[int((x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)]
         if index < 0 or index_old < 0:
             return
+
+        # If the combined map doesn't have a semantic label, add one
+        has_label = False
+        for channel in range(label_size):
+            if abs(combined_labels[index, channel]) > 1e-7:
+                has_label = True
+                break
+
+        if not has_label:
+            for channel in range(label_size):
+                combined_labels[index, channel] = old_labels[index_old, channel]
 
         ## Combine mean
         # x
