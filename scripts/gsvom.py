@@ -1137,33 +1137,6 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __combine_old_metrics(combined_metrics, combined_hit_count,combined_total_count,combined_min_height, combined_index_map, combined_origin, old_metrics, old_hit_count,old_total_count,old_min_height, old_index_map, old_origin, voxel_count, metrics_list, xy_size, z_size, num_metrics):
-        x, y, z = cuda.grid(3)
-
-        if(x >= xy_size or y >= xy_size or z >= z_size):
-            return
-
-        dx = combined_origin[0] - old_origin[0]
-        dy = combined_origin[1] - old_origin[1]
-        dz = combined_origin[2] - old_origin[2]
-
-        if((x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0):
-            return
-
-        index = combined_index_map[int(
-            x + y * xy_size + z * xy_size * xy_size)]
-        index_old = old_index_map[int(
-            (x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)]
-
-        if(index < 0 or index_old < 0):
-            return
-
-        combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
-        combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
-        combined_min_height[index] = min(combined_min_height[index],old_min_height[index_old])
-
-    @staticmethod
-    @cuda.jit
     def __combine_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size_old,
                           z_size_old, xy_size_comb, z_size_comb):
         x_o, y_o, z_o = cuda.grid(3)
