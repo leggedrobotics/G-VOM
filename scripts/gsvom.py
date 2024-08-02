@@ -55,6 +55,7 @@ class Gsvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.label_length = label_length
+        self.max_num_of_label_voting_points = 512  # The maximum allowed number of points that will be used to vote on a voxel label.
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -69,7 +70,6 @@ class Gsvom:
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
         self.label_buffer = [None] * self.buffer_size
-        self.label_votes_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
             self.semaphores.append(threading.Semaphore())
@@ -82,7 +82,6 @@ class Gsvom:
         self.combined_metrics = None
         self.combined_cell_count_cpu = None
         self.combined_labels = None
-        self.combined_label_votes = None
 
         self.last_combined_index_map = None
         self.last_combined_hit_count = None
@@ -92,7 +91,6 @@ class Gsvom:
         self.last_combined_metrics = None
         self.last_combined_cell_count_cpu = None
         self.last_combined_labels = None
-        self.last_combined_label_votes = None
 
         self.height_map = None
         self.inferred_height_map = None
@@ -173,8 +171,8 @@ class Gsvom:
 
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
-                                                                      tmp_total_count, point_to_voxel_map, point_count, ego_position,
-                                                                      origin)
+                                                                      tmp_total_count, point_to_voxel_map, point_count,
+                                                                      ego_position, origin)
 
         ###### Populate the lookup table with the correct indexes ######
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
@@ -196,33 +194,33 @@ class Gsvom:
         # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
         max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
         self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
-        max_number_hits_cpu = max_number_hits.copy_to_host()[0]
+        max_num_of_voting_points = min(max_number_hits.copy_to_host()[0], self.max_num_of_label_voting_points)
         # Associate point labels with voxels
-        all_labels_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu * self.label_length], dtype=np.int32))
-        voxel_stack_pointers = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
-        self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](point_labels, self.label_length,
-                                                                                              pointcloud, point_count,
+        label_indexes_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
+        nums_painted_points = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
+        self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](pointcloud, point_count,
                                                                                               self.xy_resolution, self.xy_size,
-                                                                                              self.z_resolution, self.z_size, origin,
-                                                                                              index_map, voxel_stack_pointers,
-                                                                                              all_labels_per_voxel)
+                                                                                              self.z_resolution, self.z_size,
+                                                                                              origin, index_map,
+                                                                                              max_num_of_voting_points,
+                                                                                              nums_painted_points,
+                                                                                              label_indexes_per_voxel)
         # Find the label for each voxel
         blocks_semantic_assignment = int(np.ceil(cell_count_cpu / self.threads_per_block))
         blockspergrid_cell_2D = math.ceil(cell_count_cpu / self.threads_per_block_2D[0])
         blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_feature_2D)
         # Here the unique label arrays are a hack to have arrays with parametrized size inside the cuda kernel, they are needed only inside
-        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu], dtype=np.float16))
-        unique_labels = cuda.to_device(np.zeros([cell_count_cpu, max_number_hits_cpu * self.label_length], dtype=np.float16))
+        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
+        unique_label_indexes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
 
         voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu,
                                                                           self.label_length)
-        voxel_label_votes = cuda.device_array([cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blocks_semantic_assignment, self.threads_per_block](voxel_label_votes, 0, cell_count_cpu)
-        self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](all_labels_per_voxel, self.label_length,
-                                                                                         hit_count, cell_count_cpu, unique_labels,
-                                                                                         unique_label_votes, voxel_labels,
-                                                                                         voxel_label_votes)
+        self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](label_indexes_per_voxel, point_labels,
+                                                                                         self.label_length, nums_painted_points,
+                                                                                         cell_count_cpu, unique_label_indexes,
+                                                                                         unique_label_votes,
+                                                                                         max_num_of_voting_points, voxel_labels)
 
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
@@ -237,15 +235,12 @@ class Gsvom:
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
-        self.label_votes_buffer[self.buffer_index] = voxel_label_votes
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
         self.last_buffer_index = self.buffer_index
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
-        
-        return point_labels.copy_to_host()
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
@@ -291,10 +286,8 @@ class Gsvom:
         ###### Combine the data ######
         blockspergrid_cell = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block))
         blockspergrid_cell_2d = int(math.ceil(self.combined_cell_count_cpu / self.threads_per_block_2D[0]))
-        blockspergrid_all_features_2d = int(math.ceil((self.buffer_size+1)*self.label_length / self.threads_per_block_2D[1]))
-        blockspergrid_all_features = (blockspergrid_cell_2d, blockspergrid_all_features_2d)
-        blockspergrid_all_maps_2d = int(math.ceil((self.buffer_size+1) / self.threads_per_block_2D[1]))
-        blockspergrid_all_maps = (blockspergrid_cell_2d, blockspergrid_all_maps_2d)
+        blockspergrid_feature_2D = int(math.ceil(self.label_length / self.threads_per_block_2D[1]))
+        blockspergrid_features_2D = (blockspergrid_cell_2d, blockspergrid_feature_2D)
 
         self.combined_hit_count = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
         self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_hit_count, 0, self.combined_cell_count_cpu)
@@ -307,18 +300,10 @@ class Gsvom:
         self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_min_height, 1,
                                                                          self.combined_cell_count_cpu)
 
-        unique_labels = cuda.device_array([self.combined_cell_count_cpu, (self.buffer_size+1)*self.label_length],
-                                                dtype=np.float32)
-        self.__init_2D_array[blockspergrid_all_features, self.threads_per_block_2D](unique_labels, 0,
+        self.combined_labels = cuda.device_array([self.combined_cell_count_cpu, self.label_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
                                                                                    self.combined_cell_count_cpu,
-                                                                                   (self.buffer_size+1)*self.label_length)
-        unique_label_votes = cuda.device_array([self.combined_cell_count_cpu, (self.buffer_size+1)], dtype=np.int32)
-        self.__init_2D_array[blockspergrid_all_maps, self.threads_per_block_2D](unique_label_votes, 0,
-                                                                                self.combined_cell_count_cpu,
-                                                                                (self.buffer_size + 1))
-        unique_label_stack_pointers = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](unique_label_stack_pointers, 0,
-                                                                         self.combined_cell_count_cpu)
+                                                                                   self.label_length)
 
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_metric_2D)
@@ -327,7 +312,7 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.combined_metrics, 0, self.combined_cell_count_cpu,
                                                                          self.metrics_count)
 
-        for i in range(0, self.buffer_size):
+        for i in range(self.buffer_size-1, -1, -1):
             # Combine maps currently in the buffer
             self.semaphores[i].acquire()
             if self.origin_buffer[i] is None:
@@ -336,12 +321,10 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             unique_labels, unique_label_votes,
-                                                                             unique_label_stack_pointers,
-                                                                             self.metrics_buffer[i], self.hit_count_buffer[i],
-                                                                             self.total_count_buffer[i], self.min_height_buffer[i],
-                                                                             self.index_buffer[i], self.origin_buffer[i],
-                                                                             self.label_buffer[i], self.label_votes_buffer[i],
+                                                                             self.combined_labels, self.metrics_buffer[i],
+                                                                             self.hit_count_buffer[i], self.total_count_buffer[i],
+                                                                             self.min_height_buffer[i], self.index_buffer[i],
+                                                                             self.origin_buffer[i], self.label_buffer[i],
                                                                              self.xy_size, self.z_size, self.label_length)
             self.semaphores[i].release()
 
@@ -350,35 +333,15 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             unique_labels, unique_label_votes,
-                                                                             unique_label_stack_pointers,
+                                                                             self.combined_labels,
                                                                              self.last_combined_metrics,
                                                                              self.last_combined_hit_count,
                                                                              self.last_combined_total_count,
                                                                              self.last_combined_min_height,
                                                                              self.last_combined_index_map,
                                                                              self.last_combined_origin,
-                                                                             self.last_combined_labels,
-                                                                             self.last_combined_label_votes, self.xy_size,
-                                                                             self.z_size, self.label_length)
-
-        # Combine the semantic labels
-        blockspergrid_feature_2D = int(math.ceil(self.label_length / self.threads_per_block_2D[1]))
-        blockspergrid_features_2D = (blockspergrid_cell_2d, blockspergrid_feature_2D)
-
-        self.combined_labels = cuda.device_array([self.combined_cell_count_cpu, self.label_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
-                                                                                   self.combined_cell_count_cpu,
-                                                                                   self.label_length)
-
-        self.combined_label_votes = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int32)
-        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_label_votes, 0,
-                                                                         self.combined_cell_count_cpu)
-
-        self.__combine_voxel_labels[blockspergrid_cell, self.threads_per_block](unique_labels, unique_label_votes,
-                                                                                unique_label_stack_pointers, self.combined_labels,
-                                                                                self.combined_label_votes,
-                                                                                self.combined_cell_count_cpu, self.label_length)
+                                                                             self.last_combined_labels, self.xy_size, self.z_size,
+                                                                             self.label_length)
 
         # Store the current combined map as the last combined map for the next cycle
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
@@ -389,7 +352,6 @@ class Gsvom:
         self.last_combined_min_height = self.combined_min_height
         self.last_combined_origin = self.combined_origin
         self.last_combined_labels = self.combined_labels
-        self.last_combined_label_votes = self.combined_label_votes
 
         self.last_buffer_index = None
         self.buffer_index = 0
@@ -482,7 +444,7 @@ class Gsvom:
         """ Returns a point and a label for each occupied cell in the combined occupancy map"""
         occupied_cell_count = self.combined_cell_count_cpu
         out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
-        out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=float))
+        out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
         buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
 
         blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
@@ -1024,8 +986,8 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
-                          combined_origin, unique_labels, unique_label_votes, label_stack_pointers, old_metrics, old_hit_count, old_total_count,
-                          old_min_height, old_index_map, old_origin, old_labels, old_label_votes, xy_size, z_size, label_size):
+                          combined_origin, combined_labels, old_metrics, old_hit_count, old_total_count, old_min_height,
+                          old_index_map, old_origin, old_labels, xy_size, z_size, label_size):
         x, y, z = cuda.grid(3)
 
         # Check kernel bounds
@@ -1044,35 +1006,16 @@ class Gsvom:
         if index < 0 or index_old < 0:
             return
 
-        # Identify unique semantic labels
-        cur_label = old_labels[index_old]
-        is_zero = True
-        for dim_id in range(label_size):
-            if abs(cur_label[dim_id]) > 1e-7:
-                is_zero = False
+        # If the combined map doesn't have a semantic label, add one
+        has_label = False
+        for channel in range(label_size):
+            if abs(combined_labels[index, channel]) > 1e-7:
+                has_label = True
                 break
 
-        if not is_zero:
-            num_unique_labels = label_stack_pointers[index]
-            is_unique = True
-            for ulabel_idx in range(num_unique_labels):
-                ulabel_start = ulabel_idx * label_size
-                all_match = True
-                for dim_id in range(label_size):
-                    if abs(cur_label[dim_id] - unique_labels[index, ulabel_start + dim_id]) > 1e-7:
-                        all_match = False
-                        break
-                if all_match:
-                    unique_label_votes[index, ulabel_idx] += old_label_votes[index_old]
-                    is_unique = False
-                    break
-
-            if is_unique:
-                unique_l_start = num_unique_labels * label_size
-                for dim_id in range(label_size):
-                    unique_labels[index, unique_l_start + dim_id] = cur_label[dim_id]
-                unique_label_votes[index, num_unique_labels] = old_label_votes[index_old]
-                label_stack_pointers[index] += 1
+        if not has_label:
+            for channel in range(label_size):
+                combined_labels[index, channel] = old_labels[index_old, channel]
 
         ## Combine mean
         # x
@@ -1126,28 +1069,6 @@ class Gsvom:
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
         combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
-
-    @staticmethod
-    @cuda.jit
-    def __combine_voxel_labels(unique_labels, unique_label_votes, unique_label_stack_pointers, combined_labels, combined_label_votes,
-                             voxel_count, label_size):
-        i = cuda.grid(1)
-        if i >= voxel_count:
-            return
-
-        num_unique_labels = unique_label_stack_pointers[i]
-        max_num_votes = 0
-        max_label_id = -1
-        for label_id in range(num_unique_labels):
-            if unique_label_votes[i, label_id] > max_num_votes:
-                max_num_votes = unique_label_votes[i, label_id]
-                max_label_id = label_id
-
-        if max_label_id >= 0:
-            combined_label_votes[i] = max_num_votes
-            max_label_start_id = max_label_id*label_size
-            for dim_id in range(label_size):
-                combined_labels[i, dim_id] = unique_labels[i, max_label_start_id + dim_id]
 
     @staticmethod
     @cuda.jit
@@ -1659,8 +1580,8 @@ class Gsvom:
     
     @staticmethod
     @cuda.jit
-    def __aggregate_semantic_labels_in_voxels(point_labels, label_size, points, point_count, xy_resolution, xy_size, z_resolution, z_size,
-                                              origin, index_map, stack_pointers, all_labels_in_voxel):
+    def __aggregate_semantic_labels_in_voxels(points, point_count, xy_resolution, xy_size, z_resolution, z_size, origin, index_map,
+                                              max_num_of_voting_points, out_num_colored_points, out_all_label_indexes_in_voxel):
         i = cuda.grid(1)
         if i >= point_count:
             return
@@ -1676,30 +1597,29 @@ class Gsvom:
         if z_index < 0 or z_index >= z_size:
             return
 
-        # Put the label at the top of the voxel's stack
+        # Put the label at the top of the voxel's stack, if the stack is not full
         voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
         buffer_index = index_map[voxel_index]
-        stack_index = cuda.atomic.add(stack_pointers, buffer_index, label_size)
-        for channel in range(label_size):
-            all_labels_in_voxel[buffer_index, stack_index+channel] = point_labels[i, channel]
+        if out_num_colored_points[buffer_index] < max_num_of_voting_points:
+            stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+            out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
     
     @staticmethod
     @cuda.jit
-    def __assign_label_to_voxel(all_labels_in_voxel, label_size, hit_counts, voxel_count, unique_labels, unique_label_votes,
-                                voxel_labels, label_votes):
+    def __assign_label_to_voxel(label_indexes_in_voxel, point_labels, label_size, colored_point_counts, occupied_voxel_count,
+                                unique_label_indexes, unique_label_votes, max_num_unique_labels, out_voxel_labels):
         i = cuda.grid(1)
-        if i >= voxel_count:
+        if i >= occupied_voxel_count:
             return
-        
-        label_count = hit_counts[i]
-        labels = all_labels_in_voxel[i]
+
+        label_indexes = label_indexes_in_voxel[i]
         num_unique_labels = 0
-        for label_idx in range(label_count):
-            label_start = label_idx*label_size
+        for point_idx in range(colored_point_counts[i]):
+            label = point_labels[label_indexes[point_idx]]
 
             is_zero = True
             for dim_id in range(label_size):
-                if abs(labels[label_start + dim_id]) > 1e-7:
+                if abs(label[dim_id]) > 1e-7:
                     is_zero = False
                     break
             if is_zero:
@@ -1707,10 +1627,10 @@ class Gsvom:
 
             is_unique = True
             for ulabel_idx in range(num_unique_labels):
-                ulabel_start = ulabel_idx*label_size
+                unique_label = point_labels[unique_label_indexes[i, ulabel_idx]]
                 all_match = True
                 for dim_id in range(label_size):
-                    if abs(labels[label_start+dim_id] - unique_labels[i, ulabel_start+dim_id]) > 1e-7:
+                    if abs(label[dim_id] - unique_label[dim_id]) > 1e-7:
                         all_match = False
                         break
                 if all_match:
@@ -1718,24 +1638,21 @@ class Gsvom:
                     is_unique = False
                     break
             
-            if is_unique:
-                unique_l_start = num_unique_labels*label_size
-                for dim_id in range(label_size):
-                    unique_labels[i, unique_l_start+dim_id] = labels[label_start+dim_id]
+            if is_unique and num_unique_labels < max_num_unique_labels:
+                unique_label_indexes[i, num_unique_labels] = label_indexes[point_idx]
                 unique_label_votes[i, num_unique_labels] = 1
                 num_unique_labels += 1
         
         max_index = -1
         max_num_votes = 0
-        for label_idx in range(num_unique_labels):
-            if unique_label_votes[i, label_idx] > max_num_votes:
-                max_num_votes = unique_label_votes[i, label_idx]
-                max_index = label_idx
-        label_votes[i] = max_num_votes
-        best_label_start = max_index*label_size
-        if best_label_start >= 0:
+        for point_idx in range(num_unique_labels):
+            if unique_label_votes[i, point_idx] > max_num_votes:
+                max_num_votes = unique_label_votes[i, point_idx]
+                max_index = point_idx
+        if max_index >= 0:
+            voxel_label = point_labels[unique_label_indexes[i, max_index]]
             for dim_id in range(label_size):
-                voxel_labels[i, dim_id] = unique_labels[i, best_label_start + dim_id]
+                out_voxel_labels[i, dim_id] = voxel_label[dim_id]
     
     @staticmethod
     @cuda.jit
