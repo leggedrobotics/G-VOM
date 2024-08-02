@@ -27,12 +27,13 @@ class Gsvom:
     ground_to_lidar_height:         Distance between the ground and the LiDAR, used to fill in height information around the robot
     xy_eigen_dist:                  The number of voxels in the xy directions used to calculate eigen values of point distribution and surface slope
     z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
-    label_length                    The dimension of the semantic label used
+    label_length:                   The dimension of the semantic label used
+    use_dynamic_global_map:         If the map pointclouds get integrated to should move with the robot, or stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist, label_length):
+                 xy_eigen_dist, z_eigen_dist, label_length, use_dynamic_combined_map):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -75,6 +76,11 @@ class Gsvom:
         for i in range(self.buffer_size):
             self.semaphores.append(threading.Semaphore())
 
+        self.use_dynamic_combined_map = use_dynamic_combined_map
+        self.combined_xy_size = xy_size
+        self.combined_z_size = z_size
+        self.combined_voxel_count = self.combined_xy_size * self.combined_xy_size * self.combined_z_size
+
         self.combined_index_map = None
         self.combined_hit_count = None
         self.combined_total_count = None
@@ -94,6 +100,8 @@ class Gsvom:
         self.last_combined_cell_count_cpu = None
         self.last_combined_labels = None
         self.last_combined_timestamps = None
+        self.last_combined_xy_size = None
+        self.last_combined_z_size = None
 
         self.height_map = None
         self.inferred_height_map = None
@@ -255,15 +263,19 @@ class Gsvom:
             return
 
         ###### Combine the lookup tables, calculate total number of occupied voxels ######
-        self.combined_origin = cuda.to_device(self.origin_buffer[self.last_buffer_index].copy_to_host())
+        if self.use_dynamic_combined_map:
+            self.combined_origin = cuda.to_device(self.origin_buffer[self.last_buffer_index].copy_to_host())
+        else:
+            self.calculate_static_combined_map_size_and_origin()
         combined_origin_world = self.combined_origin.copy_to_host()
         combined_origin_world[0] = combined_origin_world[0] * self.xy_resolution
         combined_origin_world[1] = combined_origin_world[1] * self.xy_resolution
         combined_origin_world[2] = combined_origin_world[2] * self.z_resolution
 
         combined_cell_count = cuda.to_device(np.zeros([1], dtype=np.int64))
-        self.combined_index_map = cuda.device_array([self.voxel_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks,self.threads_per_block](self.combined_index_map, -1, self.voxel_count)
+        self.combined_index_map = cuda.device_array([self.combined_voxel_count], dtype=np.int32)
+        combined_blocks = math.ceil(self.combined_voxel_count / self.threads_per_block)
+        self.__init_1D_array[combined_blocks, self.threads_per_block](self.combined_index_map, -1, self.combined_voxel_count)
 
         blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
         blockspergrid_z = math.ceil(self.z_size / self.threads_per_block_3D[2])
@@ -277,16 +289,22 @@ class Gsvom:
                 continue
             self.__combine_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
                                                                              self.combined_origin, self.index_buffer[i],
-                                                                             self.origin_buffer[i], self.xy_size, self.z_size)
+                                                                             self.origin_buffer[i], self.xy_size, self.z_size,
+                                                                             self.combined_xy_size, self.combined_z_size)
             self.semaphores[i].release()
 
         if not self.last_combined_origin is None:
             # If previous merged map exists, combine it too
-            self.__combine_old_indices[blockspergrid, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
-                                                                                 self.combined_origin,
-                                                                                 self.last_combined_index_map, self.voxel_count,
-                                                                                 self.last_combined_origin, self.xy_size,
-                                                                                 self.z_size)
+            blockspergrid_xy_last = math.ceil(self.last_combined_xy_size / self.threads_per_block_3D[0])
+            blockspergrid_z_last = math.ceil(self.last_combined_z_size / self.threads_per_block_3D[2])
+            blockspergrid_last = (blockspergrid_xy_last, blockspergrid_xy_last, blockspergrid_z_last)
+            self.__combine_old_indices[blockspergrid_last, self.threads_per_block_3D](combined_cell_count, self.combined_index_map,
+                                                                                      self.combined_origin,
+                                                                                      self.last_combined_index_map,
+                                                                                      self.last_combined_origin,
+                                                                                      self.last_combined_xy_size,
+                                                                                      self.last_combined_z_size,
+                                                                                      self.combined_xy_size, self.combined_z_size)
         self.combined_cell_count_cpu = combined_cell_count[0]
 
         ###### Combine the data ######
@@ -334,24 +352,27 @@ class Gsvom:
                                                                              self.total_count_buffer[i], self.min_height_buffer[i],
                                                                              self.index_buffer[i], self.origin_buffer[i],
                                                                              self.label_buffer[i], self.map_timestamp_buffer[i],
-                                                                             self.xy_size, self.z_size, self.label_length, True)
+                                                                             self.xy_size, self.z_size, self.combined_xy_size,
+                                                                             self.combined_z_size, self.label_length, True)
             self.semaphores[i].release()
 
         if not (self.last_combined_origin is None):
             # If previous merged map exists, combine it too
-            self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
-                                                                             self.combined_total_count, self.combined_min_height,
-                                                                             self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels, self.combined_timestamps,
-                                                                             self.last_combined_metrics,
-                                                                             self.last_combined_hit_count,
-                                                                             self.last_combined_total_count,
-                                                                             self.last_combined_min_height,
-                                                                             self.last_combined_index_map,
-                                                                             self.last_combined_origin,
-                                                                             self.last_combined_labels,
-                                                                             self.last_combined_timestamps, self.xy_size,
-                                                                             self.z_size, self.label_length, False)
+            self.__combine_metrics[blockspergrid_last, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
+                                                                                  self.combined_total_count, self.combined_min_height,
+                                                                                  self.combined_index_map, self.combined_origin,
+                                                                                  self.combined_labels, self.combined_timestamps,
+                                                                                  self.last_combined_metrics,
+                                                                                  self.last_combined_hit_count,
+                                                                                  self.last_combined_total_count,
+                                                                                  self.last_combined_min_height,
+                                                                                  self.last_combined_index_map,
+                                                                                  self.last_combined_origin,
+                                                                                  self.last_combined_labels,
+                                                                                  self.last_combined_timestamps,
+                                                                                  self.last_combined_xy_size, self.last_combined_z_size,
+                                                                                  self.combined_xy_size, self.combined_z_size,
+                                                                                  self.label_length, False)
 
         # Store the current combined map as the last combined map for the next cycle
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
@@ -363,6 +384,8 @@ class Gsvom:
         self.last_combined_origin = self.combined_origin
         self.last_combined_labels = self.combined_labels
         self.last_combined_timestamps = self.combined_timestamps
+        self.last_combined_xy_size = self.combined_xy_size
+        self.last_combined_z_size = self.combined_z_size
 
         self.last_buffer_index = None
         self.buffer_index = 0
@@ -458,13 +481,14 @@ class Gsvom:
         out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
         buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
 
-        blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
-        blockspergrid_z = math.ceil(self.z_size / self.threads_per_block_3D[2])
+        blockspergrid_xy = math.ceil(self.combined_xy_size / self.threads_per_block_3D[0])
+        blockspergrid_z = math.ceil(self.combined_z_size / self.threads_per_block_3D[2])
         blockspergrid = (blockspergrid_xy, blockspergrid_xy, blockspergrid_z)
         self.__make_debug_painted_occupancy_pointcloud[blockspergrid, self.threads_per_block_3D](self.combined_index_map,
                                                                                                  self.combined_labels,
                                                                                                  self.combined_origin,
-                                                                                                 self.xy_size, self.z_size,
+                                                                                                 self.combined_xy_size,
+                                                                                                 self.combined_z_size,
                                                                                                  self.xy_resolution,
                                                                                                  self.z_resolution,
                                                                                                  self.label_length, buffer_index,
@@ -521,6 +545,28 @@ class Gsvom:
                                                                                             self.xy_size, self.xy_resolution,
                                                                                             self.z_resolution)
         return output_height_map_voxel
+
+    def calculate_static_combined_map_size_and_origin(self):
+        self.combined_origin = np.inf*np.ones(3)
+        map_size_offset = np.array([self.xy_size, self.xy_size, self.z_size])
+        most_distant_corner = -np.inf*np.ones(3)
+        for buffer_entry in range(self.last_buffer_index+1):
+            this_origin = self.origin_buffer[buffer_entry].copy_to_host()
+            self.combined_origin = np.minimum(self.combined_origin, this_origin)
+            this_distant_corner = this_origin + map_size_offset
+            most_distant_corner = np.maximum(most_distant_corner, this_distant_corner)
+
+        if not self.last_combined_origin is None:
+            self.combined_origin = np.minimum(self.combined_origin, self.last_combined_origin.copy_to_host())
+            combined_map_size_offset = np.array([self.combined_xy_size, self.combined_xy_size, self.combined_z_size])
+            this_distant_corner = self.last_combined_origin + combined_map_size_offset
+            most_distant_corner = np.maximum(most_distant_corner, this_distant_corner)
+
+        edge_sizes = most_distant_corner - self.combined_origin
+        self.combined_xy_size = int(np.max(edge_sizes[:2]))
+        self.combined_z_size = int(edge_sizes[2])
+        self.combined_voxel_count = int(self.combined_xy_size*self.combined_xy_size*self.combined_z_size)
+        self.combined_origin = cuda.to_device(self.combined_origin)
 
     @staticmethod
     @cuda.jit
@@ -998,23 +1044,25 @@ class Gsvom:
     @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
                           combined_origin, combined_labels, combined_timestamps, old_metrics, old_hit_count, old_total_count,
-                          old_min_height, old_index_map, old_origin, old_labels, old_timestamps, xy_size, z_size, label_size,
-                          merging_buffer):
-        x, y, z = cuda.grid(3)
+                          old_min_height, old_index_map, old_origin, old_labels, old_timestamps, xy_size_old, z_size_old,
+                          xy_size_comb, z_size_comb, label_size, merging_buffer):
+        x_o, y_o, z_o = cuda.grid(3)
 
-        # Check kernel bounds
-        if x >= xy_size or y >= xy_size or z >= z_size:
+        if x_o >= xy_size_old or y_o >= xy_size_old or z_o >= z_size_old:
             return
 
-        # Calculate offset between old and new maps
-        dx = combined_origin[0] - old_origin[0]
-        dy = combined_origin[1] - old_origin[1]
-        dz = combined_origin[2] - old_origin[2]
-        if (x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0:
+        dx = old_origin[0] - combined_origin[0]
+        x_c = x_o + dx
+        dy = old_origin[1] - combined_origin[1]
+        y_c = y_o + dy
+        dz = old_origin[2] - combined_origin[2]
+        z_c = z_o + dz
+
+        if x_c >= xy_size_comb or y_c >= xy_size_comb or z_c >= z_size_comb or x_c < 0 or y_c < 0 or z_c < 0:
             return
 
-        index = combined_index_map[int(x + y * xy_size + z * xy_size * xy_size)]
-        index_old = old_index_map[int((x + dx) + (y + dy) * xy_size + (z + dz) * xy_size * xy_size)]
+        index_old = old_index_map[int(x_o + y_o * xy_size_old + z_o * xy_size_old * xy_size_old)]
+        index = combined_index_map[int(x_c + y_c * xy_size_comb + z_c * xy_size_comb * xy_size_comb)]
         if index < 0 or index_old < 0:
             return
 
@@ -1116,59 +1164,63 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __combine_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size, z_size):
-        x, y, z = cuda.grid(3)
+    def __combine_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size_old,
+                          z_size_old, xy_size_comb, z_size_comb):
+        x_o, y_o, z_o = cuda.grid(3)
 
-        if x >= xy_size or y >= xy_size or z >= z_size:
+        if x_o >= xy_size_old or y_o >= xy_size_old or z_o >= z_size_old:
             return
 
-        dx = combined_origin[0] - old_origin[0]
-        dy = combined_origin[1] - old_origin[1]
-        dz = combined_origin[2] - old_origin[2]
+        dx = old_origin[0] - combined_origin[0]
+        x_c = x_o + dx
+        dy = old_origin[1] - combined_origin[1]
+        y_c = y_o + dy
+        dz = old_origin[2] - combined_origin[2]
+        z_c = z_o + dz
 
-        if (x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0:
+        if x_c >= xy_size_comb or y_c >= xy_size_comb or z_c >= z_size_comb or x_c < 0 or y_c < 0 or z_c < 0:
             return
 
-        index = int(x + y * xy_size + z * xy_size * xy_size)
-        index_old = int((x + dx) + (y + dy) * xy_size +
-                        (z + dz) * xy_size * xy_size)
+        index_old = int(x_o + y_o * xy_size_old + z_o * xy_size_old * xy_size_old)
+        index_comb = int(x_c + y_c * xy_size_comb + z_c * xy_size_comb * xy_size_comb)
 
-        # If there is no data or empty data in the combined map and an occpuied voexl in the new map
-        if old_index_map[index_old] >= 0 and combined_index_map[index] <= -1:
-            combined_index_map[index] = cuda.atomic.add(combined_cell_count, 0, 1)
+        # If there is no data or empty data in the combined map and an occupied voxel in the new map
+        if old_index_map[index_old] >= 0 and combined_index_map[index_comb] <= -1:
+            combined_index_map[index_comb] = cuda.atomic.add(combined_cell_count, 0, 1)
 
         # If there is an empty cell in the old map and no data or empty data in the new map
-        elif old_index_map[index_old] < -1 and combined_index_map[index] <= -1:
-            combined_index_map[index] += old_index_map[index_old] + 1
+        elif old_index_map[index_old] < -1 and combined_index_map[index_comb] <= -1:
+            combined_index_map[index_comb] += old_index_map[index_old] + 1
 
     @staticmethod
     @cuda.jit
-    def __combine_old_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, voxel_count, old_origin, xy_size, z_size):
-        x, y, z = cuda.grid(3)
+    def __combine_old_indices(combined_cell_count, combined_index_map, combined_origin, old_index_map, old_origin, xy_size_old,
+                              z_size_old, xy_size_comb, z_size_comb):
+        x_o, y_o, z_o = cuda.grid(3)
 
-        if(x >= xy_size or y >= xy_size or z >= z_size):
-            #print("bad index")
+        if x_o >= xy_size_old or y_o >= xy_size_old or z_o >= z_size_old:
             return
 
-        dx = combined_origin[0] - old_origin[0]
-        dy = combined_origin[1] - old_origin[1]
-        dz = combined_origin[2] - old_origin[2]
+        dx = old_origin[0] - combined_origin[0]
+        x_c = x_o + dx
+        dy = old_origin[1] - combined_origin[1]
+        y_c = y_o + dy
+        dz = old_origin[2] - combined_origin[2]
+        z_c = z_o + dz
 
-        if((x + dx) >= xy_size or (y + dy) >= xy_size or (z + dz) >= z_size or (x+dx) < 0 or (y+dy) < 0 or (z+dz) < 0):
-            # print("oob")
+        if x_c >= xy_size_comb or y_c >= xy_size_comb or z_c >= z_size_comb or x_c < 0 or y_c < 0 or z_c < 0:
             return
 
-        index = int(x + y * xy_size + z * xy_size * xy_size)
-        index_old = int((x + dx) + (y + dy) * xy_size +
-                        (z + dz) * xy_size * xy_size)
+        index_old = int(x_o + y_o * xy_size_old + z_o * xy_size_old * xy_size_old)
+        index_comb = int(x_c + y_c * xy_size_comb + z_c * xy_size_comb * xy_size_comb)
 
-        # If there is no data in the combined map and an occpuied voexl in the new map
-        if((old_index_map[index_old]) >= 0 and (combined_index_map[index] <= -1) and (combined_index_map[index] >= -11)):
-            combined_index_map[index] = cuda.atomic.add(combined_cell_count, 0, 1)
+        # If there is no data or empty data in the combined map and an occupied voxel in the new map
+        if (old_index_map[index_old]) >= 0 and (combined_index_map[index_comb] <= -1) and (combined_index_map[index_comb] >= -11):
+            combined_index_map[index_comb] = cuda.atomic.add(combined_cell_count, 0, 1)
 
-        # if there is an empty cell in the old map and no data or empty data in the new map
-        elif(old_index_map[index_old] < -1 and combined_index_map[index] <= -1):
-            combined_index_map[index] += old_index_map[index_old] + 1
+        # If there is an empty cell in the old map and no data or empty data in the new map
+        elif old_index_map[index_old] < -1 and combined_index_map[index_comb] <= -1:
+            combined_index_map[index_comb] += old_index_map[index_old] + 1
 
     @staticmethod
     @cuda.jit
