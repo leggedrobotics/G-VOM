@@ -16,7 +16,11 @@ catkin build
 ## Install dependencies for launching the ros node
 ```bash
 python -m pip install pyyaml numba rospkg matplotlib
+```
 
+## Downgrade numpy
+```bash
+python -m pip install "numpy<1.24"
 ```
 
 ## now start the launch file

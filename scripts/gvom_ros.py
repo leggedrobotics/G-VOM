@@ -13,7 +13,6 @@ import time
 
 class VoxelMapper:
     def __init__(self):
-
         self.odom_data = None
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -189,7 +188,7 @@ class VoxelMapper:
             rospy.loginfo("published voxel inferred height map debug.")
             
 if __name__ == '__main__':
-    rospy.init_node('voxel_mapping')
+    rospy.init_node('gvom_ros', anonymous=True)
 
     node = VoxelMapper()
 
