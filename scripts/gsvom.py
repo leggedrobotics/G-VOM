@@ -70,6 +70,7 @@ class Gsvom:
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
         self.label_buffer = [None] * self.buffer_size
+        self.map_timestamp_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
             self.semaphores.append(threading.Semaphore())
@@ -82,6 +83,7 @@ class Gsvom:
         self.combined_metrics = None
         self.combined_cell_count_cpu = None
         self.combined_labels = None
+        self.combined_timestamps = None
 
         self.last_combined_index_map = None
         self.last_combined_hit_count = None
@@ -91,6 +93,7 @@ class Gsvom:
         self.last_combined_metrics = None
         self.last_combined_cell_count_cpu = None
         self.last_combined_labels = None
+        self.last_combined_timestamps = None
 
         self.height_map = None
         self.inferred_height_map = None
@@ -105,6 +108,7 @@ class Gsvom:
 
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
+        self.current_timestep = 0
 
     def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix,
                      distortion_params):
@@ -235,8 +239,10 @@ class Gsvom:
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
+        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([self.current_timestep])  # It is an array to make timestamp merging less memory intense to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
+        self.current_timestep += 1
         self.last_buffer_index = self.buffer_index
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
@@ -304,6 +310,8 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
                                                                                    self.combined_cell_count_cpu,
                                                                                    self.label_length)
+        self.combined_timestamps = cuda.device_array([self.combined_cell_count_cpu], dtype=np.uint16)
+        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_timestamps, 0, self.combined_cell_count_cpu)
 
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_metric_2D)
@@ -321,11 +329,12 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels, self.metrics_buffer[i],
-                                                                             self.hit_count_buffer[i], self.total_count_buffer[i],
-                                                                             self.min_height_buffer[i], self.index_buffer[i],
-                                                                             self.origin_buffer[i], self.label_buffer[i],
-                                                                             self.xy_size, self.z_size, self.label_length)
+                                                                             self.combined_labels, self.combined_timestamps,
+                                                                             self.metrics_buffer[i], self.hit_count_buffer[i],
+                                                                             self.total_count_buffer[i], self.min_height_buffer[i],
+                                                                             self.index_buffer[i], self.origin_buffer[i],
+                                                                             self.label_buffer[i], self.map_timestamp_buffer[i],
+                                                                             self.xy_size, self.z_size, self.label_length, True)
             self.semaphores[i].release()
 
         if not (self.last_combined_origin is None):
@@ -333,15 +342,16 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels,
+                                                                             self.combined_labels, self.combined_timestamps,
                                                                              self.last_combined_metrics,
                                                                              self.last_combined_hit_count,
                                                                              self.last_combined_total_count,
                                                                              self.last_combined_min_height,
                                                                              self.last_combined_index_map,
                                                                              self.last_combined_origin,
-                                                                             self.last_combined_labels, self.xy_size, self.z_size,
-                                                                             self.label_length)
+                                                                             self.last_combined_labels,
+                                                                             self.last_combined_timestamps, self.xy_size,
+                                                                             self.z_size, self.label_length, False)
 
         # Store the current combined map as the last combined map for the next cycle
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
@@ -352,6 +362,7 @@ class Gsvom:
         self.last_combined_min_height = self.combined_min_height
         self.last_combined_origin = self.combined_origin
         self.last_combined_labels = self.combined_labels
+        self.last_combined_timestamps = self.combined_timestamps
 
         self.last_buffer_index = None
         self.buffer_index = 0
@@ -986,8 +997,9 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
-                          combined_origin, combined_labels, old_metrics, old_hit_count, old_total_count, old_min_height,
-                          old_index_map, old_origin, old_labels, xy_size, z_size, label_size):
+                          combined_origin, combined_labels, combined_timestamps, old_metrics, old_hit_count, old_total_count,
+                          old_min_height, old_index_map, old_origin, old_labels, old_timestamps, xy_size, z_size, label_size,
+                          merging_buffer):
         x, y, z = cuda.grid(3)
 
         # Check kernel bounds
@@ -1069,6 +1081,11 @@ class Gsvom:
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
         combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
+        if merging_buffer:
+            timestamp_index = 0
+        else:
+            timestamp_index = index_old
+        combined_timestamps[index] = max(combined_timestamps[index], old_timestamps[timestamp_index])
 
     @staticmethod
     @cuda.jit
