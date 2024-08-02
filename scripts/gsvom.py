@@ -444,7 +444,7 @@ class Gsvom:
         """ Returns a point and a label for each occupied cell in the combined occupancy map"""
         occupied_cell_count = self.combined_cell_count_cpu
         out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
-        out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=float))
+        out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
         buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
 
         blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
