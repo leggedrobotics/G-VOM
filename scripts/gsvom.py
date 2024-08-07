@@ -247,7 +247,7 @@ class Gsvom:
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
-        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([self.current_timestep])  # It is an array to make timestamp merging less memory intense to implement
+        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([self.current_timestep])  # It is an array to make timestamp merging easier to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
         self.current_timestep += 1
@@ -328,8 +328,8 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
                                                                                    self.combined_cell_count_cpu,
                                                                                    self.label_length)
-        self.combined_timestamps = cuda.device_array([self.combined_cell_count_cpu], dtype=np.uint16)
-        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_timestamps, 0, self.combined_cell_count_cpu)
+        self.combined_timestamps = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int16)
+        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_timestamps, -1, self.combined_cell_count_cpu)
 
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_metric_2D)
@@ -466,6 +466,41 @@ class Gsvom:
         map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
         return map_return_tuple
+
+    def reset_map(self):
+        self.combined_index_map = None
+        self.combined_hit_count = None
+        self.combined_total_count = None
+        self.combined_min_height = None
+        self.combined_origin = None
+        self.combined_metrics = None
+        self.combined_cell_count_cpu = None
+        self.combined_labels = None
+        self.combined_timestamps = None
+
+        self.last_combined_index_map = None
+        self.last_combined_hit_count = None
+        self.last_combined_total_count = None
+        self.last_combined_min_height = None
+        self.last_combined_origin = None
+        self.last_combined_metrics = None
+        self.last_combined_cell_count_cpu = None
+        self.last_combined_labels = None
+        self.last_combined_timestamps = None
+        self.last_combined_xy_size = None
+        self.last_combined_z_size = None
+
+        self.height_map = None
+        self.inferred_height_map = None
+        self.roughness_map = None
+        self.guessed_height_delta = None
+        self.voxels_eigenvalues = None
+
+        self.combined_xy_size = self.xy_size
+        self.combined_z_size = self.z_size
+        self.combined_voxel_count = self.combined_xy_size * self.combined_xy_size * self.combined_z_size
+        self.buffer_index = 0
+        self.last_buffer_index = 0
 
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
@@ -1129,11 +1164,16 @@ class Gsvom:
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
         combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
+
+        # The timestamp of each voxel is the time when it was first observed (-1 means there is no data and so the value available should be used)
         if merging_buffer:
             timestamp_index = 0
         else:
             timestamp_index = index_old
-        combined_timestamps[index] = max(combined_timestamps[index], old_timestamps[timestamp_index])
+        if combined_timestamps[index] == -1:
+            combined_timestamps[index] = old_timestamps[timestamp_index]
+        else:
+            combined_timestamps[index] = min(combined_timestamps[index], old_timestamps[timestamp_index])
 
     @staticmethod
     @cuda.jit
