@@ -1681,9 +1681,11 @@ class Gsvom:
         # Put the label at the top of the voxel's stack, if the stack is not full
         voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
         buffer_index = index_map[voxel_index]
-        if out_num_colored_points[buffer_index] < max_num_of_voting_points:
-            stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+        stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+        if stack_index < max_num_of_voting_points:
             out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
+        else:
+            cuda.atomic.add(out_num_colored_points, buffer_index, -1)
     
     @staticmethod
     @cuda.jit
