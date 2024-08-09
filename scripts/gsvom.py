@@ -387,7 +387,7 @@ class Gsvom:
         self.last_combined_xy_size = self.combined_xy_size
         self.last_combined_z_size = self.combined_z_size
 
-        self.last_buffer_index = None
+        self.last_buffer_index = 0
         self.buffer_index = 0
 
         ###### Calculate eigenvalues for each voxel ######
