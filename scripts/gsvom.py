@@ -514,7 +514,6 @@ class Gsvom:
         occupied_cell_count = self.combined_cell_count_cpu
         out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
         out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
-        buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
 
         blockspergrid_xy = math.ceil(self.combined_xy_size / self.threads_per_block_3D[0])
         blockspergrid_z = math.ceil(self.combined_z_size / self.threads_per_block_3D[2])
@@ -526,8 +525,8 @@ class Gsvom:
                                                                                                  self.combined_z_size,
                                                                                                  self.xy_resolution,
                                                                                                  self.z_resolution,
-                                                                                                 self.label_length, buffer_index,
-                                                                                                 out_points, out_labels)
+                                                                                                 self.label_length, out_points,
+                                                                                                 out_labels)
 
         points = out_points.copy_to_host()
         labels = out_labels.copy_to_host()
@@ -670,26 +669,26 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __make_debug_painted_occupancy_pointcloud(index_map, label_buffer, origin, xy_size, z_size, xy_resolution, z_resolution,
-                                                  label_length, out_buffer_index, out_points, out_labels):
+                                                  label_length, out_points, out_labels):
         x_ind, y_ind, z_ind = cuda.grid(3)
         if x_ind >= xy_size or y_ind >= xy_size or z_ind >= z_size:
             return
 
         cell_index = int(x_ind + y_ind*xy_size + z_ind*xy_size*xy_size)
-        if index_map[cell_index] < 0:
+        buffer_index = index_map[cell_index]
+        if buffer_index < 0:
             return
 
         x = (origin[0] + x_ind + 0.5) * xy_resolution
         y = (origin[1] + y_ind + 0.5) * xy_resolution
         z = (origin[2] + z_ind + 0.5) * z_resolution
 
-        output_index = cuda.atomic.add(out_buffer_index, 0, 1)
-        out_points[output_index, 0] = x
-        out_points[output_index, 1] = y
-        out_points[output_index, 2] = z
+        out_points[buffer_index, 0] = x
+        out_points[buffer_index, 1] = y
+        out_points[buffer_index, 2] = z
 
         for channel in range(label_length):
-            out_labels[output_index, channel] = label_buffer[index_map[cell_index], channel]
+            out_labels[buffer_index, channel] = label_buffer[buffer_index, channel]
 
     @staticmethod
     @cuda.jit
