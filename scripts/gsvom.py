@@ -116,10 +116,9 @@ class Gsvom:
 
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
-        self.current_timestep = 0
 
     def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix,
-                     distortion_params):
+                     distortion_params, current_timestep):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -247,10 +246,9 @@ class Gsvom:
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
-        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([self.current_timestep])  # It is an array to make timestamp merging less memory intense to implement
+        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([current_timestep])  # It is an array to make timestamp merging easier to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
-        self.current_timestep += 1
         self.last_buffer_index = self.buffer_index
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
@@ -328,8 +326,8 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_features_2D, self.threads_per_block_2D](self.combined_labels, 0,
                                                                                    self.combined_cell_count_cpu,
                                                                                    self.label_length)
-        self.combined_timestamps = cuda.device_array([self.combined_cell_count_cpu], dtype=np.uint16)
-        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_timestamps, 0, self.combined_cell_count_cpu)
+        self.combined_timestamps = cuda.device_array([self.combined_cell_count_cpu], dtype=np.int16)
+        self.__init_1D_array[blockspergrid_cell, self.threads_per_block](self.combined_timestamps, -1, self.combined_cell_count_cpu)
 
         blockspergrid_metric_2D = math.ceil(self.metrics_count / self.threads_per_block_2D[1])
         blockspergrid_2D = (blockspergrid_cell_2d, blockspergrid_metric_2D)
@@ -387,7 +385,7 @@ class Gsvom:
         self.last_combined_xy_size = self.combined_xy_size
         self.last_combined_z_size = self.combined_z_size
 
-        self.last_buffer_index = None
+        self.last_buffer_index = 0
         self.buffer_index = 0
 
         ###### Calculate eigenvalues for each voxel ######
@@ -467,6 +465,41 @@ class Gsvom:
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
         return map_return_tuple
 
+    def reset_map(self):
+        self.combined_index_map = None
+        self.combined_hit_count = None
+        self.combined_total_count = None
+        self.combined_min_height = None
+        self.combined_origin = None
+        self.combined_metrics = None
+        self.combined_cell_count_cpu = None
+        self.combined_labels = None
+        self.combined_timestamps = None
+
+        self.last_combined_index_map = None
+        self.last_combined_hit_count = None
+        self.last_combined_total_count = None
+        self.last_combined_min_height = None
+        self.last_combined_origin = None
+        self.last_combined_metrics = None
+        self.last_combined_cell_count_cpu = None
+        self.last_combined_labels = None
+        self.last_combined_timestamps = None
+        self.last_combined_xy_size = None
+        self.last_combined_z_size = None
+
+        self.height_map = None
+        self.inferred_height_map = None
+        self.roughness_map = None
+        self.guessed_height_delta = None
+        self.voxels_eigenvalues = None
+
+        self.combined_xy_size = self.xy_size
+        self.combined_z_size = self.z_size
+        self.combined_voxel_count = self.combined_xy_size * self.combined_xy_size * self.combined_z_size
+        self.buffer_index = 0
+        self.last_buffer_index = 0
+
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
         lookup_table = self.last_combined_index_map.copy_to_host()
@@ -479,7 +512,6 @@ class Gsvom:
         occupied_cell_count = self.combined_cell_count_cpu
         out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
         out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
-        buffer_index = cuda.to_device(np.zeros((1), dtype=np.int32))
 
         blockspergrid_xy = math.ceil(self.combined_xy_size / self.threads_per_block_3D[0])
         blockspergrid_z = math.ceil(self.combined_z_size / self.threads_per_block_3D[2])
@@ -491,8 +523,8 @@ class Gsvom:
                                                                                                  self.combined_z_size,
                                                                                                  self.xy_resolution,
                                                                                                  self.z_resolution,
-                                                                                                 self.label_length, buffer_index,
-                                                                                                 out_points, out_labels)
+                                                                                                 self.label_length, out_points,
+                                                                                                 out_labels)
 
         points = out_points.copy_to_host()
         labels = out_labels.copy_to_host()
@@ -635,26 +667,26 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __make_debug_painted_occupancy_pointcloud(index_map, label_buffer, origin, xy_size, z_size, xy_resolution, z_resolution,
-                                                  label_length, out_buffer_index, out_points, out_labels):
+                                                  label_length, out_points, out_labels):
         x_ind, y_ind, z_ind = cuda.grid(3)
         if x_ind >= xy_size or y_ind >= xy_size or z_ind >= z_size:
             return
 
         cell_index = int(x_ind + y_ind*xy_size + z_ind*xy_size*xy_size)
-        if index_map[cell_index] < 0:
+        buffer_index = index_map[cell_index]
+        if buffer_index < 0:
             return
 
         x = (origin[0] + x_ind + 0.5) * xy_resolution
         y = (origin[1] + y_ind + 0.5) * xy_resolution
         z = (origin[2] + z_ind + 0.5) * z_resolution
 
-        output_index = cuda.atomic.add(out_buffer_index, 0, 1)
-        out_points[output_index, 0] = x
-        out_points[output_index, 1] = y
-        out_points[output_index, 2] = z
+        out_points[buffer_index, 0] = x
+        out_points[buffer_index, 1] = y
+        out_points[buffer_index, 2] = z
 
         for channel in range(label_length):
-            out_labels[output_index, channel] = label_buffer[index_map[cell_index], channel]
+            out_labels[buffer_index, channel] = label_buffer[buffer_index, channel]
 
     @staticmethod
     @cuda.jit
@@ -1129,11 +1161,16 @@ class Gsvom:
         combined_hit_count[index] = combined_hit_count[index] + old_hit_count[index_old]
         combined_total_count[index] = combined_total_count[index] + old_total_count[index_old]
         combined_min_height[index] = min(combined_min_height[index], old_min_height[index_old])
+
+        # The timestamp of each voxel is the time when it was first observed (-1 means there is no data and so the value available should be used)
         if merging_buffer:
             timestamp_index = 0
         else:
             timestamp_index = index_old
-        combined_timestamps[index] = max(combined_timestamps[index], old_timestamps[timestamp_index])
+        if combined_timestamps[index] == -1:
+            combined_timestamps[index] = old_timestamps[timestamp_index]
+        else:
+            combined_timestamps[index] = min(combined_timestamps[index], old_timestamps[timestamp_index])
 
     @staticmethod
     @cuda.jit
@@ -1642,9 +1679,11 @@ class Gsvom:
         # Put the label at the top of the voxel's stack, if the stack is not full
         voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
         buffer_index = index_map[voxel_index]
-        if out_num_colored_points[buffer_index] < max_num_of_voting_points:
-            stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+        stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
+        if stack_index < max_num_of_voting_points:
             out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
+        else:
+            cuda.atomic.add(out_num_colored_points, buffer_index, -1)
     
     @staticmethod
     @cuda.jit
