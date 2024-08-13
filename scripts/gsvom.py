@@ -116,10 +116,9 @@ class Gsvom:
 
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
-        self.current_timestep = 0
 
     def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix,
-                     distortion_params):
+                     distortion_params, current_timestep):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -247,10 +246,9 @@ class Gsvom:
         self.min_height_buffer[self.buffer_index] = min_height
         self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
-        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([self.current_timestep])  # It is an array to make timestamp merging easier to implement
+        self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([current_timestep])  # It is an array to make timestamp merging easier to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
-        self.current_timestep += 1
         self.last_buffer_index = self.buffer_index
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
