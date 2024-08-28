@@ -85,7 +85,6 @@ class Gsvom:
         self.metrics_buffer = [None] * self.buffer_size
         self.origin_buffer = [None] * self.buffer_size
         self.min_height_buffer = [None] * self.buffer_size
-        self.label_buffer = [None] * self.buffer_size
         self.map_timestamp_buffer = [None] * self.buffer_size
         self.semaphores = []
         for i in range(self.buffer_size):
@@ -200,13 +199,6 @@ class Gsvom:
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
                                                               origin)
 
-        ###### Create an empty label buffer ######
-        blockspergrid_point_2D = math.ceil(point_count / self.threads_per_block_2D[0])
-        blockspergrid_feature_2D = math.ceil(self.label_length / self.threads_per_block_2D[1])
-        blockspergrid_2D = (blockspergrid_point_2D, blockspergrid_feature_2D)
-        voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu, self.label_length)
-
         ###### Assign data to buffer ######
         self.semaphores[self.buffer_index].acquire()            # Block the main thread from accessing this buffer index
         self.index_buffer[self.buffer_index] = index_map
@@ -214,7 +206,6 @@ class Gsvom:
         self.total_count_buffer[self.buffer_index] = total_count
         self.metrics_buffer[self.buffer_index] = metrics
         self.min_height_buffer[self.buffer_index] = min_height
-        self.label_buffer[self.buffer_index] = voxel_labels
         self.origin_buffer[self.buffer_index] = origin
         self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([current_timestep])  # It is an array to make timestamp merging easier to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
@@ -391,7 +382,7 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](self.combined_metrics, 0, self.combined_cell_count_cpu,
                                                                          self.metrics_count)
 
-        for i in range(self.buffer_size-1, -1, -1):
+        for i in range(self.buffer_size):
             # Combine maps currently in the buffer
             self.semaphores[i].acquire()
             if self.origin_buffer[i] is None:
@@ -400,13 +391,12 @@ class Gsvom:
             self.__combine_metrics[blockspergrid, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                              self.combined_total_count, self.combined_min_height,
                                                                              self.combined_index_map, self.combined_origin,
-                                                                             self.combined_labels, self.combined_timestamps,
-                                                                             self.metrics_buffer[i], self.hit_count_buffer[i],
-                                                                             self.total_count_buffer[i], self.min_height_buffer[i],
-                                                                             self.index_buffer[i], self.origin_buffer[i],
-                                                                             self.label_buffer[i], self.map_timestamp_buffer[i],
+                                                                             self.combined_timestamps, self.metrics_buffer[i],
+                                                                             self.hit_count_buffer[i], self.total_count_buffer[i],
+                                                                             self.min_height_buffer[i], self.index_buffer[i],
+                                                                             self.origin_buffer[i], self.map_timestamp_buffer[i],
                                                                              self.xy_size, self.z_size, self.combined_xy_size,
-                                                                             self.combined_z_size, self.label_length, True)
+                                                                             self.combined_z_size, True)
             self.semaphores[i].release()
 
         if not (self.last_combined_origin is None):
@@ -414,18 +404,23 @@ class Gsvom:
             self.__combine_metrics[blockspergrid_last, self.threads_per_block_3D](self.combined_metrics, self.combined_hit_count,
                                                                                   self.combined_total_count, self.combined_min_height,
                                                                                   self.combined_index_map, self.combined_origin,
-                                                                                  self.combined_labels, self.combined_timestamps,
-                                                                                  self.last_combined_metrics,
+                                                                                  self.combined_timestamps, self.last_combined_metrics,
                                                                                   self.last_combined_hit_count,
                                                                                   self.last_combined_total_count,
                                                                                   self.last_combined_min_height,
                                                                                   self.last_combined_index_map,
                                                                                   self.last_combined_origin,
-                                                                                  self.last_combined_labels,
                                                                                   self.last_combined_timestamps,
-                                                                                  self.last_combined_xy_size, self.last_combined_z_size,
-                                                                                  self.combined_xy_size, self.combined_z_size,
-                                                                                  self.label_length, False)
+                                                                                  self.last_combined_xy_size,
+                                                                                  self.last_combined_z_size, self.combined_xy_size,
+                                                                                  self.combined_z_size, False)
+            self.__move_labels_to_new_buffer[blockspergrid_last, self.threads_per_block_3D](self.combined_labels, self.combined_index_map,
+                                                                                            self.combined_xy_size, self.combined_z_size,
+                                                                                            self.combined_origin, self.last_combined_labels,
+                                                                                            self.last_combined_index_map,
+                                                                                            self.last_combined_xy_size,
+                                                                                            self.last_combined_z_size,
+                                                                                            self.last_combined_origin, self.label_length)
 
         ###### Reset the buffer pointer ######
         self.last_buffer_index = 0
@@ -1118,9 +1113,9 @@ class Gsvom:
     @staticmethod
     @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
-                          combined_origin, combined_labels, combined_timestamps, old_metrics, old_hit_count, old_total_count,
-                          old_min_height, old_index_map, old_origin, old_labels, old_timestamps, xy_size_old, z_size_old,
-                          xy_size_comb, z_size_comb, label_size, merging_buffer):
+                          combined_origin, combined_timestamps, old_metrics, old_hit_count, old_total_count, old_min_height,
+                          old_index_map, old_origin, old_timestamps, xy_size_old, z_size_old, xy_size_comb, z_size_comb,
+                          merging_buffer):
         x_o, y_o, z_o = cuda.grid(3)
 
         if x_o >= xy_size_old or y_o >= xy_size_old or z_o >= z_size_old:
@@ -1140,17 +1135,6 @@ class Gsvom:
         index = combined_index_map[int(x_c + y_c * xy_size_comb + z_c * xy_size_comb * xy_size_comb)]
         if index < 0 or index_old < 0:
             return
-
-        # If the combined map doesn't have a semantic label, add one
-        has_label = False
-        for channel in range(label_size):
-            if abs(combined_labels[index, channel]) > 1e-7:
-                has_label = True
-                break
-
-        if not has_label:
-            for channel in range(label_size):
-                combined_labels[index, channel] = old_labels[index_old, channel]
 
         ## Combine mean
         # x
@@ -1274,6 +1258,32 @@ class Gsvom:
         # If there is an empty cell in the old map and no data or empty data in the new map
         elif old_index_map[index_old] < -1 and combined_index_map[index_comb] <= -1:
             combined_index_map[index_comb] += old_index_map[index_old] + 1
+
+    @staticmethod
+    @cuda.jit
+    def __move_labels_to_new_buffer(new_labels, new_index_map, new_xy_size, new_z_size, new_origin, old_labels, old_index_map,
+                                    xy_size_old, z_size_old, old_origin, label_length):
+        x_o, y_o, z_o = cuda.grid(3)
+        if x_o >= xy_size_old or y_o >= xy_size_old or z_o >= z_size_old:
+            return
+
+        dx = old_origin[0] - new_origin[0]
+        x_n = x_o + dx
+        dy = old_origin[1] - new_origin[1]
+        y_n = y_o + dy
+        dz = old_origin[2] - new_origin[2]
+        z_n = z_o + dz
+
+        if x_n >= new_xy_size or y_n >= new_xy_size or z_n >= new_z_size or x_n < 0 or y_n < 0 or z_n < 0:
+            return
+
+        index_old = old_index_map[int(x_o + y_o * xy_size_old + z_o * xy_size_old * xy_size_old)]
+        index = new_index_map[int(x_n + y_n * new_xy_size + z_n * new_xy_size * new_xy_size)]
+        if index < 0 or index_old < 0:
+            return
+
+        for channel in range(label_length):
+            new_labels[index, channel] = old_labels[index_old, channel]
 
     @staticmethod
     @cuda.jit
