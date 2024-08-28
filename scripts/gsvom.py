@@ -56,7 +56,7 @@ class Gsvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.label_length = label_length
-        self.max_num_of_label_voting_points = 512  # The maximum allowed number of points that will be used to vote on a voxel label.
+        self.label_assignment_vector_length = int(np.ceil(self.xy_size/2))
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -117,7 +117,7 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_data(self, pointcloud, ego_position, lidar_to_world, current_timestep):
+    def process_pointcloud(self, pointcloud, ego_position, lidar_to_world, current_timestep):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -208,6 +208,45 @@ class Gsvom:
         self.buffer_index += 1
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
+
+    def process_semantics(self, image, projection_matrix, camera_to_world, distortion_params):
+        """ Assign semantic labels from image to the voxel map"""
+        image_width = image.shape[0]
+        image_height = image.shape[1]
+        pixel_count = image_width*image_height
+        camera_to_world = cuda.to_device(camera_to_world)
+        projection_matrix = cuda.to_device(projection_matrix)
+        distortion_params = cuda.to_device(distortion_params)
+
+        blockspergrid_ray_num_2d = math.ceil(pixel_count / self.threads_per_block_2D[0])
+        blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
+        blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
+        blockspergrid_rays = math.ceil(pixel_count / self.threads_per_block)
+
+        ###### Get vectors indicating the environment density along a ray projected from each pixel ######
+        x_indices, y_indices = np.indices((image_width, image_height))
+        sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
+        sampled_rays_gpu = cuda.to_device(sampled_rays)
+        density_vectors = cuda.device_array([pixel_count, self.label_assignment_vector_length], dtype=np.float32)
+        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0, pixel_count,
+                                                                               self.label_assignment_vector_length)
+
+        self.__extract_densities_along_rays[blockspergrid_rays, self.threads_per_block](camera_to_world, projection_matrix,
+                                                                                        distortion_params, sampled_rays_gpu,
+                                                                                        pixel_count, self.xy_resolution,
+                                                                                        self.z_resolution, self.combined_xy_size,
+                                                                                        self.combined_z_size, self.combined_origin,
+                                                                                        self.combined_index_map, self.combined_hit_count,
+                                                                                        self.combined_total_count,
+                                                                                        self.label_assignment_vector_length,
+                                                                                        density_vectors)
+        # Remove samples that didn't hit any occupied voxels
+        density_vectors = density_vectors.copy_to_host()
+        is_ray_unoccupied = np.all(density_vectors == 0, axis=1)
+        unoccupied_rows = np.where(is_ray_unoccupied)[0]
+        density_vectors = np.delete(density_vectors, unoccupied_rows, axis=0)
+        sampled_rays = np.delete(sampled_rays, unoccupied_rows, axis=0)
+
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
@@ -1510,7 +1549,7 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __calculate_eigenvalues(voxels_eigenvalues,metrics,cell_count):
+    def __calculate_eigenvalues(voxels_eigenvalues, metrics,cell_count):
         i = cuda.grid(1)
         if i >= cell_count:
             return
@@ -1556,6 +1595,82 @@ class Gsvom:
             voxels_eigenvalues[i, 0] = q + 2.0 * p * math.cos(phi)
             voxels_eigenvalues[i, 2] = q + 2.0 * p * math.cos(phi + (2.0*math.pi/3.0))
             voxels_eigenvalues[i, 1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
+
+    @staticmethod
+    @cuda.jit
+    def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
+                                       xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
+                                       total_count_buffer, out_vector_length, out_density_vectors):
+        sample_index = cuda.grid(1)
+        if sample_index >= num_samples:
+            return
+
+        px_x = sampled_rays[sample_index, 0]
+        px_y = sampled_rays[sample_index, 1]
+        fx = projection_matrix[0, 0]
+        cx = projection_matrix[0, 2]
+        fy = projection_matrix[1, 1]
+        cy = projection_matrix[1, 2]
+        x_cam = (px_x - cx) / fx
+        y_cam = (px_y - cy) / fy
+        z_cam = 1
+
+        cam_pos_x = camera_to_world[0, 3]
+        cam_pos_y = camera_to_world[1, 3]
+        cam_pos_z = camera_to_world[2, 3]
+
+        x_px_world = camera_to_world[0, 0] * x_cam + camera_to_world[0, 1] * y_cam + camera_to_world[0, 2] * z_cam + cam_pos_x
+        y_px_world = camera_to_world[1, 0] * x_cam + camera_to_world[1, 1] * y_cam + camera_to_world[1, 2] * z_cam + cam_pos_y
+        z_px_world = camera_to_world[2, 0] * x_cam + camera_to_world[2, 1] * y_cam + camera_to_world[2, 2] * z_cam + cam_pos_z
+
+        pt = numba.cuda.local.array(3, numba.float32)
+        end = numba.cuda.local.array(3, numba.float32)
+        slope = numba.cuda.local.array(3, numba.float32)
+
+        pt[0] = cam_pos_x / xy_resolution
+        pt[1] = cam_pos_y / xy_resolution
+        pt[2] = cam_pos_z / z_resolution
+
+        end[0] = x_px_world / xy_resolution
+        end[1] = y_px_world / xy_resolution
+        end[2] = z_px_world / z_resolution
+
+        slope[0] = end[0] - pt[0]
+        slope[1] = end[1] - pt[1]
+        slope[2] = end[2] - pt[2]
+
+        ray_length = math.sqrt(slope[0] * slope[0] + slope[1] * slope[1] + slope[2] * slope[2])
+        slope[0] = slope[0] / ray_length
+        slope[1] = slope[1] / ray_length
+        slope[2] = slope[2] / ray_length
+
+        slope_max = max(abs(slope[0]), max(abs(slope[1]), abs(slope[2])))
+        slope_index = 0
+        if slope_max == abs(slope[1]):
+            slope_index = 1
+        if slope_max == abs(slope[2]):
+            slope_index = 2
+        direction = slope[slope_index] / abs(slope[slope_index])
+
+        for voxel_num in range(out_vector_length):
+            pt[slope_index] += direction
+            pt[(slope_index + 1) % 3] += slope[(slope_index + 1) % 3] / abs(slope[slope_index])
+            pt[(slope_index + 2) % 3] += slope[(slope_index + 2) % 3] / abs(slope[slope_index])
+
+            x_index = math.floor(pt[0] - map_origin[0])
+            if x_index < 0 or x_index >= xy_size:
+                continue
+            y_index = math.floor(pt[1] - map_origin[1])
+            if y_index < 0 or y_index >= xy_size:
+                continue
+            z_index = math.floor(pt[2] - map_origin[2])
+            if z_index < 0 or z_index >= z_size:
+                continue
+
+            voxel_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
+            buffer_index = lookup_table[voxel_index]
+            if buffer_index > -1:
+                out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
 
     @staticmethod
     @cuda.jit
