@@ -302,6 +302,19 @@ class Gsvom:
             print("[WARNING] The map buffer is empty, nothing will happen!")
             return
 
+        ###### Store the current combined map as the last combined map ######
+        self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
+        self.last_combined_hit_count = self.combined_hit_count
+        self.last_combined_total_count = self.combined_total_count
+        self.last_combined_index_map = self.combined_index_map
+        self.last_combined_metrics = self.combined_metrics
+        self.last_combined_min_height = self.combined_min_height
+        self.last_combined_origin = self.combined_origin
+        self.last_combined_labels = self.combined_labels
+        self.last_combined_timestamps = self.combined_timestamps
+        self.last_combined_xy_size = self.combined_xy_size
+        self.last_combined_z_size = self.combined_z_size
+
         ###### Combine the lookup tables, calculate total number of occupied voxels ######
         if self.use_dynamic_combined_map:
             self.combined_origin = cuda.to_device(self.origin_buffer[self.last_buffer_index].copy_to_host())
@@ -414,19 +427,7 @@ class Gsvom:
                                                                                   self.combined_xy_size, self.combined_z_size,
                                                                                   self.label_length, False)
 
-        # Store the current combined map as the last combined map for the next cycle
-        self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
-        self.last_combined_hit_count = self.combined_hit_count
-        self.last_combined_total_count = self.combined_total_count
-        self.last_combined_index_map = self.combined_index_map
-        self.last_combined_metrics = self.combined_metrics
-        self.last_combined_min_height = self.combined_min_height
-        self.last_combined_origin = self.combined_origin
-        self.last_combined_labels = self.combined_labels
-        self.last_combined_timestamps = self.combined_timestamps
-        self.last_combined_xy_size = self.combined_xy_size
-        self.last_combined_z_size = self.combined_z_size
-
+        ###### Reset the buffer pointer ######
         self.last_buffer_index = 0
         self.buffer_index = 0
 
