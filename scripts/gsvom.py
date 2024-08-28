@@ -3,7 +3,11 @@ from numba import cuda, config
 import numpy as np
 import math
 import threading
+import torch
 
+# [WARNING] This connects gvom to the code of Hynek Zamazal's master's thesis in leggedrobotics/semantic_mapping.
+# TODO: Before using this implementation, this needs to be addressed
+from association_2d_3d.model_v1.model_v1 import ModelV1
 
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
@@ -28,12 +32,16 @@ class Gsvom:
     xy_eigen_dist:                  The number of voxels in the xy directions used to calculate eigen values of point distribution and surface slope
     z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
     label_length:                   The dimension of the semantic label used
+    num_labels:                     Number of possible semantic labels
+    association_model_weight_path:  Path to a file where the pretrained weights of the label association model weights are stored
+    place_label_threshold:          If the label association model output is higher than this, the label is associated with the voxel in question
     use_dynamic_global_map:         If the map pointclouds get integrated to should move with the robot, or stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist, label_length, use_dynamic_combined_map):
+                 xy_eigen_dist, z_eigen_dist, label_length, num_labels, association_model_weight_path, place_label_threshold,
+                 use_dynamic_combined_map):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -57,6 +65,13 @@ class Gsvom:
 
         self.label_length = label_length
         self.label_assignment_vector_length = int(np.ceil(self.xy_size/2))
+        self.label_count = num_labels
+        self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
+        self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
+        self.label_association_model.to(self.torch_device)
+        self.label_association_model.eval()
+        self.association_threshold = place_label_threshold
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -247,6 +262,18 @@ class Gsvom:
         density_vectors = np.delete(density_vectors, unoccupied_rows, axis=0)
         sampled_rays = np.delete(sampled_rays, unoccupied_rows, axis=0)
 
+        ###### Encode semantic labels in one-hot-fashion ######
+        sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
+        num_labels_to_map = sampled_pixel_labels.shape[0]
+        label_vectors = np.zeros((num_labels_to_map, self.label_count), dtype=np.float32)
+        label_vectors[np.arange(num_labels_to_map), sampled_pixel_labels.squeeze()] = 1
+
+        ###### Figure out to which voxels to assign the label ######
+        density_vectors = torch.from_numpy(density_vectors).to(self.torch_device)
+        label_vectors = torch.from_numpy(label_vectors).to(self.torch_device)
+        outputs = self.label_association_model(label_vectors, density_vectors)
+        # Place labels into selected occupied voxels
+        place_label = (outputs > self.association_threshold) & (density_vectors > 0)
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
