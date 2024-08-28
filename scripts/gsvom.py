@@ -117,8 +117,7 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_data(self, pointcloud, ego_position, lidar_to_world, image, world_to_camera, projection_matrix,
-                     distortion_params, current_timestep):
+    def process_data(self, pointcloud, ego_position, lidar_to_world, current_timestep):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()
@@ -131,18 +130,8 @@ class Gsvom:
             return
         pointcloud = cuda.to_device(pointcloud)
 
-        image_width = image.shape[0]
-        image_height = image.shape[1]
-        image = cuda.to_device(image)
-        projection_matrix = cuda.to_device(projection_matrix)
-        distortion_params = cuda.to_device(distortion_params)
-        world_to_camera = cuda.to_device(world_to_camera)
-
         blocks_pointcloud = int(np.ceil(point_count / self.threads_per_block))
         blocks_map = int(np.ceil(self.voxel_count / self.threads_per_block))
-        blockspergrid_point_2D = math.ceil(point_count / self.threads_per_block_2D[0])
-        blockspergrid_feature_2D = math.ceil(self.label_length / self.threads_per_block_2D[1])
-        blockspergrid_2D = (blockspergrid_point_2D, blockspergrid_feature_2D)
 
         cell_count = cuda.to_device(np.zeros([1], dtype=np.int32))
 
@@ -160,15 +149,6 @@ class Gsvom:
         if not lidar_to_world is None:
             lidar_to_world = cuda.to_device(lidar_to_world)
             self.__transform_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, lidar_to_world, point_count)
-        
-        ###### Paint the pointcloud ######
-        point_labels = cuda.device_array([point_count, self.label_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](point_labels, 0, point_count,
-                                                                          self.label_length)
-
-        self.__paint_pointcloud[blocks_pointcloud, self.threads_per_block](pointcloud, point_count, image, projection_matrix,
-                                                                           distortion_params, world_to_camera, image_width,
-                                                                           image_height, point_labels, self.label_length)
         
         ###### Count points in each voxel, number of rays through each voxel and point to voxel index map ######
         tmp_hit_count = cuda.device_array([self.voxel_count], dtype=np.int32)
@@ -201,41 +181,16 @@ class Gsvom:
         self.__move_data[blocks_map, self.threads_per_block](tmp_hit_count, hit_count, index_map, self.voxel_count)
         self.__move_data[blocks_map, self.threads_per_block](tmp_total_count, total_count, index_map, self.voxel_count)
 
-        ###### Pick a semantic label for each voxel ######
-        # Find the maximum number of hits in a voxel and use it to create the array to store painted pointcloud data
-        max_number_hits = cuda.to_device(np.zeros([1], dtype=np.int32))
-        self.__find_max_in_1D_array[blocks_map, self.threads_per_block](max_number_hits, hit_count, cell_count_cpu)
-        max_num_of_voting_points = min(max_number_hits.copy_to_host()[0], self.max_num_of_label_voting_points)
-        # Associate point labels with voxels
-        label_indexes_per_voxel = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
-        nums_painted_points = cuda.to_device(np.zeros([cell_count_cpu], dtype=np.int32))
-        self.__aggregate_semantic_labels_in_voxels[blocks_pointcloud, self.threads_per_block](pointcloud, point_count,
-                                                                                              self.xy_resolution, self.xy_size,
-                                                                                              self.z_resolution, self.z_size,
-                                                                                              origin, index_map,
-                                                                                              max_num_of_voting_points,
-                                                                                              nums_painted_points,
-                                                                                              label_indexes_per_voxel)
-        # Find the label for each voxel
-        blocks_semantic_assignment = int(np.ceil(cell_count_cpu / self.threads_per_block))
-        blockspergrid_cell_2D = math.ceil(cell_count_cpu / self.threads_per_block_2D[0])
-        blockspergrid_2D = (blockspergrid_cell_2D, blockspergrid_feature_2D)
-        # Here the unique label arrays are a hack to have arrays with parametrized size inside the cuda kernel, they are needed only inside
-        unique_label_votes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
-        unique_label_indexes = cuda.to_device(np.zeros([cell_count_cpu, max_num_of_voting_points], dtype=np.int32))
-
-        voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu,
-                                                                          self.label_length)
-        self.__assign_label_to_voxel[blocks_semantic_assignment, self.threads_per_block](label_indexes_per_voxel, point_labels,
-                                                                                         self.label_length, nums_painted_points,
-                                                                                         cell_count_cpu, unique_label_indexes,
-                                                                                         unique_label_votes,
-                                                                                         max_num_of_voting_points, voxel_labels)
-
         ###### Calculate metrics ######
         metrics, min_height = self.__calculate_metrics_master(pointcloud, point_count, hit_count, index_map, cell_count_cpu,
                                                               origin)
+
+        ###### Create an empty label buffer ######
+        blockspergrid_point_2D = math.ceil(point_count / self.threads_per_block_2D[0])
+        blockspergrid_feature_2D = math.ceil(self.label_length / self.threads_per_block_2D[1])
+        blockspergrid_2D = (blockspergrid_point_2D, blockspergrid_feature_2D)
+        voxel_labels = cuda.device_array([cell_count_cpu, self.label_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_2D, self.threads_per_block_2D](voxel_labels, 0, cell_count_cpu, self.label_length)
 
         ###### Assign data to buffer ######
         self.semaphores[self.buffer_index].acquire()            # Block the main thread from accessing this buffer index
@@ -244,8 +199,8 @@ class Gsvom:
         self.total_count_buffer[self.buffer_index] = total_count
         self.metrics_buffer[self.buffer_index] = metrics
         self.min_height_buffer[self.buffer_index] = min_height
-        self.origin_buffer[self.buffer_index] = origin
         self.label_buffer[self.buffer_index] = voxel_labels
+        self.origin_buffer[self.buffer_index] = origin
         self.map_timestamp_buffer[self.buffer_index] = cuda.to_device([current_timestep])  # It is an array to make timestamp merging easier to implement
         self.semaphores[self.buffer_index].release()            # Release this buffer index
 
@@ -1601,147 +1556,6 @@ class Gsvom:
             voxels_eigenvalues[i, 0] = q + 2.0 * p * math.cos(phi)
             voxels_eigenvalues[i, 2] = q + 2.0 * p * math.cos(phi + (2.0*math.pi/3.0))
             voxels_eigenvalues[i, 1] = 3.0 * q - voxels_eigenvalues[i,0] - voxels_eigenvalues[i,2]
-    
-    @staticmethod
-    @cuda.jit
-    def __paint_pointcloud(pointcloud, point_count, image, intrinsic_matrix, distortion_params, extrinsic_matrix, image_width,
-                           image_height, labels, label_length):
-        i = cuda.grid(1)
-        if i >= point_count:
-            return
-
-        pt_x_w = pointcloud[i, 0]
-        pt_y_w = pointcloud[i, 1]
-        pt_z_w = pointcloud[i, 2]
-
-        # Transform point to camera coordinate frame
-        pt_x_cam = extrinsic_matrix[0, 0] * pt_x_w + extrinsic_matrix[0, 1] * pt_y_w + extrinsic_matrix[0, 2] * pt_z_w + \
-                   extrinsic_matrix[0, 3]
-        pt_y_cam = extrinsic_matrix[1, 0] * pt_x_w + extrinsic_matrix[1, 1] * pt_y_w + extrinsic_matrix[1, 2] * pt_z_w + \
-                   extrinsic_matrix[1, 3]
-        pt_z_cam = extrinsic_matrix[2, 0] * pt_x_w + extrinsic_matrix[2, 1] * pt_y_w + extrinsic_matrix[2, 2] * pt_z_w + \
-                   extrinsic_matrix[2, 3]
-        # Make sure the point is in front of the camera
-        if pt_z_cam <= 0:
-            return
-
-        # Project the point to the image plane
-        pt_x_image = pt_x_cam / pt_z_cam
-        pt_y_image = pt_y_cam / pt_z_cam
-
-        # Account for camera distortion
-        r2 = pt_x_image**2 + pt_y_image**2
-
-        k1 = distortion_params[0]
-        k2 = distortion_params[1]
-        p1 = distortion_params[2]
-        p2 = distortion_params[3]
-
-        x_dist = pt_x_image * (1 + k1 * r2 + k2 * r2 ** 2) + 2 * p1 * pt_x_image * pt_y_image + p2 * (r2 + 2 * pt_x_image ** 2)
-        y_dist = pt_y_image * (1 + k1 * r2 + k2 * r2 ** 2) + 2 * p2 * pt_x_image * pt_y_image + p1 * (r2 + 2 * pt_y_image ** 2)
-
-        # Map the point into pixel coordinates
-        # WARNING: This operation assumes the intrinsic camera matrix has this format:
-        #          fx  0  cx
-        #          0   fy cy
-        #          0   0  1
-        px_x = intrinsic_matrix[0, 0] * x_dist + intrinsic_matrix[0, 2]
-        px_y = intrinsic_matrix[1, 1] * y_dist + intrinsic_matrix[1, 2]
-        px_x = int(round(px_x))
-        px_y = int(round(px_y))
-        # Make sure the point is within the image bounds
-        if px_x < 0 or px_x >= image_width or px_y < 0 or px_y >= image_height:
-            return
-
-        # Extract the semantic label
-        for channel in range(label_length):
-            labels[i, channel] = image[px_x, px_y, channel]
-    
-    @staticmethod
-    @cuda.jit
-    def __aggregate_semantic_labels_in_voxels(points, point_count, xy_resolution, xy_size, z_resolution, z_size, origin, index_map,
-                                              max_num_of_voting_points, out_num_colored_points, out_all_label_indexes_in_voxel):
-        i = cuda.grid(1)
-        if i >= point_count:
-            return
-        
-        # Check the point is not out of the bounds of the map
-        x_index = math.floor((points[i, 0] / xy_resolution) - origin[0])
-        if x_index < 0 or x_index >= xy_size:
-            return
-        y_index = math.floor((points[i, 1] / xy_resolution) - origin[1])
-        if y_index < 0 or y_index >= xy_size:
-            return
-        z_index = math.floor((points[i, 2] / z_resolution) - origin[2])
-        if z_index < 0 or z_index >= z_size:
-            return
-
-        # Put the label at the top of the voxel's stack, if the stack is not full
-        voxel_index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
-        buffer_index = index_map[voxel_index]
-        stack_index = cuda.atomic.add(out_num_colored_points, buffer_index, 1)
-        if stack_index < max_num_of_voting_points:
-            out_all_label_indexes_in_voxel[buffer_index, stack_index] = i
-        else:
-            cuda.atomic.add(out_num_colored_points, buffer_index, -1)
-    
-    @staticmethod
-    @cuda.jit
-    def __assign_label_to_voxel(label_indexes_in_voxel, point_labels, label_size, colored_point_counts, occupied_voxel_count,
-                                unique_label_indexes, unique_label_votes, max_num_unique_labels, out_voxel_labels):
-        i = cuda.grid(1)
-        if i >= occupied_voxel_count:
-            return
-
-        label_indexes = label_indexes_in_voxel[i]
-        num_unique_labels = 0
-        for point_idx in range(colored_point_counts[i]):
-            label = point_labels[label_indexes[point_idx]]
-
-            is_zero = True
-            for dim_id in range(label_size):
-                if abs(label[dim_id]) > 1e-7:
-                    is_zero = False
-                    break
-            if is_zero:
-                continue
-
-            is_unique = True
-            for ulabel_idx in range(num_unique_labels):
-                unique_label = point_labels[unique_label_indexes[i, ulabel_idx]]
-                all_match = True
-                for dim_id in range(label_size):
-                    if abs(label[dim_id] - unique_label[dim_id]) > 1e-7:
-                        all_match = False
-                        break
-                if all_match:
-                    unique_label_votes[i, ulabel_idx] += 1
-                    is_unique = False
-                    break
-            
-            if is_unique and num_unique_labels < max_num_unique_labels:
-                unique_label_indexes[i, num_unique_labels] = label_indexes[point_idx]
-                unique_label_votes[i, num_unique_labels] = 1
-                num_unique_labels += 1
-        
-        max_index = -1
-        max_num_votes = 0
-        for point_idx in range(num_unique_labels):
-            if unique_label_votes[i, point_idx] > max_num_votes:
-                max_num_votes = unique_label_votes[i, point_idx]
-                max_index = point_idx
-        if max_index >= 0:
-            voxel_label = point_labels[unique_label_indexes[i, max_index]]
-            for dim_id in range(label_size):
-                out_voxel_labels[i, dim_id] = voxel_label[dim_id]
-    
-    @staticmethod
-    @cuda.jit
-    def __find_max_in_1D_array(found_max_value, array, array_length):
-        i = cuda.grid(1)
-        if i >= array_length:
-            return
-        cuda.atomic.max(found_max_value, 0, array[i])
 
     @staticmethod
     @cuda.jit
