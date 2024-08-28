@@ -8,6 +8,8 @@ import torch
 # [WARNING] This connects gvom to the code of Hynek Zamazal's master's thesis in leggedrobotics/semantic_mapping.
 # TODO: Before using this implementation, this needs to be addressed
 from association_2d_3d.model_v1.model_v1 import ModelV1
+from association_2d_3d.benchmarks.benchmark_single_voxel import BenchmarkSingleVoxel
+from association_2d_3d.benchmarks.benchmark_multi_voxel import BenchmarkMultiVoxel
 
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
@@ -67,7 +69,11 @@ class Gsvom:
         self.label_assignment_vector_length = int(np.ceil(self.xy_size/2))
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # self.label_association_model = BenchmarkMultiVoxel(0.1)
+        # self.label_association_model = BenchmarkSingleVoxel(0.9)
         self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
+
         self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
