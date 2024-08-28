@@ -226,6 +226,10 @@ class Gsvom:
 
     def process_semantics(self, image, projection_matrix, camera_to_world, distortion_params):
         """ Assign semantic labels from image to the voxel map"""
+        if self.combined_origin is None:
+            print("[ERROR] There is no combined map to merge the semantics into! Nothing will happen.")
+            return
+
         image_width = image.shape[0]
         image_height = image.shape[1]
         pixel_count = image_width*image_height
@@ -274,6 +278,23 @@ class Gsvom:
         outputs = self.label_association_model(label_vectors, density_vectors)
         # Place labels into selected occupied voxels
         place_label = (outputs > self.association_threshold) & (density_vectors > 0)
+        place_label = place_label.cpu().numpy()
+
+        ###### Do the label assignment based on the model output ######
+        num_labels_to_assign = place_label.shape[0]
+        place_label = cuda.to_device(place_label)
+        sampled_rays_gpu = cuda.to_device(sampled_rays)
+        sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
+
+        blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
+        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world,
+                                                                                   projection_matrix, distortion_params, sampled_rays_gpu,
+                                                                                   num_labels_to_assign, self.xy_resolution,
+                                                                                   self.z_resolution, self.combined_xy_size,
+                                                                                   self.combined_z_size, self.combined_origin,
+                                                                                   self.combined_index_map,
+                                                                                   self.label_assignment_vector_length, place_label,
+                                                                                   self.label_length, self.combined_labels)
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
@@ -1627,7 +1648,7 @@ class Gsvom:
     @cuda.jit
     def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
                                        xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
-                                       total_count_buffer, out_vector_length, out_density_vectors):
+                                       total_count_buffer, density_vector_len, out_density_vectors):
         sample_index = cuda.grid(1)
         if sample_index >= num_samples:
             return
@@ -1679,7 +1700,7 @@ class Gsvom:
             slope_index = 2
         direction = slope[slope_index] / abs(slope[slope_index])
 
-        for voxel_num in range(out_vector_length):
+        for voxel_num in range(density_vector_len):
             pt[slope_index] += direction
             pt[(slope_index + 1) % 3] += slope[(slope_index + 1) % 3] / abs(slope[slope_index])
             pt[(slope_index + 2) % 3] += slope[(slope_index + 2) % 3] / abs(slope[slope_index])
@@ -1698,6 +1719,83 @@ class Gsvom:
             buffer_index = lookup_table[voxel_index]
             if buffer_index > -1:
                 out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
+
+    @staticmethod
+    @cuda.jit
+    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, association_vector_len, assignment_vectors, label_length, out_label_buffer):
+        sample_index = cuda.grid(1)
+        if sample_index >= num_samples:
+            return
+
+        px_x = sampled_rays[sample_index, 0]
+        px_y = sampled_rays[sample_index, 1]
+        fx = projection_matrix[0, 0]
+        cx = projection_matrix[0, 2]
+        fy = projection_matrix[1, 1]
+        cy = projection_matrix[1, 2]
+        x_cam = (px_x - cx) / fx
+        y_cam = (px_y - cy) / fy
+        z_cam = 1
+
+        cam_pos_x = camera_to_world[0, 3]
+        cam_pos_y = camera_to_world[1, 3]
+        cam_pos_z = camera_to_world[2, 3]
+
+        x_px_world = camera_to_world[0, 0] * x_cam + camera_to_world[0, 1] * y_cam + camera_to_world[0, 2] * z_cam + cam_pos_x
+        y_px_world = camera_to_world[1, 0] * x_cam + camera_to_world[1, 1] * y_cam + camera_to_world[1, 2] * z_cam + cam_pos_y
+        z_px_world = camera_to_world[2, 0] * x_cam + camera_to_world[2, 1] * y_cam + camera_to_world[2, 2] * z_cam + cam_pos_z
+
+        pt = numba.cuda.local.array(3, numba.float32)
+        end = numba.cuda.local.array(3, numba.float32)
+        slope = numba.cuda.local.array(3, numba.float32)
+
+        pt[0] = cam_pos_x / xy_resolution
+        pt[1] = cam_pos_y / xy_resolution
+        pt[2] = cam_pos_z / z_resolution
+
+        end[0] = x_px_world / xy_resolution
+        end[1] = y_px_world / xy_resolution
+        end[2] = z_px_world / z_resolution
+
+        slope[0] = end[0] - pt[0]
+        slope[1] = end[1] - pt[1]
+        slope[2] = end[2] - pt[2]
+
+        ray_length = math.sqrt(slope[0] * slope[0] + slope[1] * slope[1] + slope[2] * slope[2])
+        slope[0] = slope[0] / ray_length
+        slope[1] = slope[1] / ray_length
+        slope[2] = slope[2] / ray_length
+
+        slope_max = max(abs(slope[0]), max(abs(slope[1]), abs(slope[2])))
+        slope_index = 0
+        if slope_max == abs(slope[1]):
+            slope_index = 1
+        if slope_max == abs(slope[2]):
+            slope_index = 2
+        direction = slope[slope_index] / abs(slope[slope_index])
+
+        for voxel_num in range(association_vector_len):
+            pt[slope_index] += direction
+            pt[(slope_index + 1) % 3] += slope[(slope_index + 1) % 3] / abs(slope[slope_index])
+            pt[(slope_index + 2) % 3] += slope[(slope_index + 2) % 3] / abs(slope[slope_index])
+
+            if not assignment_vectors[sample_index, voxel_num]:
+                continue
+            x_index = math.floor(pt[0] - map_origin[0])
+            if x_index < 0 or x_index >= xy_size:
+                continue
+            y_index = math.floor(pt[1] - map_origin[1])
+            if y_index < 0 or y_index >= xy_size:
+                continue
+            z_index = math.floor(pt[2] - map_origin[2])
+            if z_index < 0 or z_index >= z_size:
+                continue
+
+            voxel_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
+            buffer_index = lookup_table[voxel_index]
+            if buffer_index > -1:
+                for channel in range(label_length):
+                    out_label_buffer[buffer_index, channel] = labels[sample_index, channel]
 
     @staticmethod
     @cuda.jit
