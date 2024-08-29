@@ -70,11 +70,11 @@ class Gsvom:
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # self.label_association_model = BenchmarkMultiVoxel(0.1)
+        self.label_association_model = BenchmarkMultiVoxel(0.1)
         # self.label_association_model = BenchmarkSingleVoxel(0.9)
-        self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
+        # self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
 
-        self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
+        # self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
         self.association_threshold = place_label_threshold
@@ -227,6 +227,10 @@ class Gsvom:
             print("[ERROR] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
+        prep_start_event = cuda.event()
+        prep_end_event = cuda.event()
+        prep_start_event.record()
+
         image_width = image.shape[0]
         image_height = image.shape[1]
         pixel_count = image_width*image_height
@@ -239,7 +243,16 @@ class Gsvom:
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
         blockspergrid_rays = math.ceil(pixel_count / self.threads_per_block)
 
+        prep_end_event.record()
+        prep_end_event.synchronize()
+        prep_time = cuda.event_elapsed_time(prep_start_event, prep_end_event)
+        print(f"Preparation time: {prep_time} ms")
+
         ###### Get vectors indicating the environment density along a ray projected from each pixel ######
+        raytracing_start_event = cuda.event()
+        raytracing_end_event = cuda.event()
+        raytracing_start_event.record()
+
         x_indices, y_indices = np.indices((image_width, image_height))
         sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
         sampled_rays_gpu = cuda.to_device(sampled_rays)
@@ -263,7 +276,16 @@ class Gsvom:
         density_vectors = np.delete(density_vectors, unoccupied_rows, axis=0)
         sampled_rays = np.delete(sampled_rays, unoccupied_rows, axis=0)
 
+        raytracing_end_event.record()
+        raytracing_end_event.synchronize()
+        raytracing_time = cuda.event_elapsed_time(raytracing_start_event, raytracing_end_event)
+        print(f"Preparation time: {raytracing_time} ms")
+
         ###### Encode semantic labels in one-hot-fashion ######
+        inference_start_event = cuda.event()
+        inference_end_event = cuda.event()
+        inference_start_event.record()
+
         sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
         num_labels_to_map = sampled_pixel_labels.shape[0]
         label_vectors = np.zeros((num_labels_to_map, self.label_count), dtype=np.float32)
@@ -277,7 +299,16 @@ class Gsvom:
         place_label = (outputs > self.association_threshold) & (density_vectors > 0)
         place_label = place_label.cpu().numpy()
 
+        inference_end_event.record()
+        inference_end_event.synchronize()
+        inference_time = cuda.event_elapsed_time(inference_start_event, inference_end_event)
+        print(f"Inference time: {inference_time} ms")
+
         ###### Do the label assignment based on the model output ######
+        placement_start_event = cuda.event()
+        placement_end_event = cuda.event()
+        placement_start_event.record()
+
         num_labels_to_assign = place_label.shape[0]
         place_label = cuda.to_device(place_label)
         sampled_rays_gpu = cuda.to_device(sampled_rays)
@@ -292,6 +323,11 @@ class Gsvom:
                                                                                    self.combined_index_map,
                                                                                    self.label_assignment_vector_length, place_label,
                                                                                    self.label_length, self.combined_labels)
+
+        placement_end_event.record()
+        placement_end_event.synchronize()
+        placement_time = cuda.event_elapsed_time(placement_start_event, placement_end_event)
+        print(f"Placement time: {placement_time} ms")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
