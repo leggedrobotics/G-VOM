@@ -70,11 +70,11 @@ class Gsvom:
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.label_association_model = BenchmarkMultiVoxel(0.1)
         # self.label_association_model = BenchmarkSingleVoxel(0.9)
-        # self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
+        # self.label_association_model = BenchmarkMultiVoxel(0.1)
+        self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
 
-        # self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
+        self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
         self.association_threshold = place_label_threshold
@@ -279,7 +279,7 @@ class Gsvom:
         raytracing_end_event.record()
         raytracing_end_event.synchronize()
         raytracing_time = cuda.event_elapsed_time(raytracing_start_event, raytracing_end_event)
-        print(f"Preparation time: {raytracing_time} ms")
+        print(f"Raytracing time: {raytracing_time} ms")
 
         ###### Encode semantic labels in one-hot-fashion ######
         inference_start_event = cuda.event()
