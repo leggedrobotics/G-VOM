@@ -1775,7 +1775,9 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, association_vector_len, assignment_vectors, label_length, out_label_buffer):
+    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
+                                  xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, association_vector_len,
+                                  assignment_vectors, label_length, out_label_buffer):
         sample_index = cuda.grid(1)
         if sample_index >= num_samples:
             return
