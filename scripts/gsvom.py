@@ -4,12 +4,15 @@ import numpy as np
 import math
 import threading
 import torch
+from scipy.spatial.transform import Rotation
 
 # [WARNING] This connects gvom to the code of Hynek Zamazal's master's thesis in leggedrobotics/semantic_mapping.
 # TODO: Before using this implementation, this needs to be addressed
-from association_2d_3d.model_v1.model_v1 import ModelV1
-from association_2d_3d.benchmarks.benchmark_single_voxel import BenchmarkSingleVoxel
-from association_2d_3d.benchmarks.benchmark_multi_voxel import BenchmarkMultiVoxel
+from association_2d_3d.models.benchmark_single_voxel import BenchmarkSingleVoxel
+from association_2d_3d.models.benchmark_multi_voxel import BenchmarkMultiVoxel
+from association_2d_3d.models.benchmark_all_voxels import BenchmarkAllVoxels
+from association_2d_3d.models.model_v1 import ModelV1
+from association_2d_3d.models.model_v6 import ModelV6
 
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
@@ -72,9 +75,10 @@ class Gsvom:
 
         # self.label_association_model = BenchmarkSingleVoxel(0.9)
         # self.label_association_model = BenchmarkMultiVoxel(0.1)
-        self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
-
+        # self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
+        self.label_association_model = ModelV6(self.label_assignment_vector_length, self.label_count)
         self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
+
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
         self.association_threshold = place_label_threshold
@@ -233,15 +237,22 @@ class Gsvom:
 
         image_width = image.shape[0]
         image_height = image.shape[1]
-        pixel_count = image_width*image_height
         camera_to_world = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
         distortion_params = cuda.to_device(distortion_params)
 
-        blockspergrid_ray_num_2d = math.ceil(pixel_count / self.threads_per_block_2D[0])
+        x_indices, y_indices = np.indices((image_width, image_height))
+        sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
+        sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
+        is_unknown_label = sampled_pixel_labels.squeeze() == 0
+        sampled_pixel_labels = sampled_pixel_labels[~is_unknown_label]
+        sampled_rays = sampled_rays[~is_unknown_label, :]
+
+        nonzero_pixel_count = sampled_rays.shape[0]
+        blockspergrid_ray_num_2d = math.ceil(nonzero_pixel_count / self.threads_per_block_2D[0])
         blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
-        blockspergrid_rays = math.ceil(pixel_count / self.threads_per_block)
+        blockspergrid_rays = math.ceil(nonzero_pixel_count / self.threads_per_block)
 
         prep_end_event.record()
         prep_end_event.synchronize()
@@ -253,16 +264,14 @@ class Gsvom:
         raytracing_end_event = cuda.event()
         raytracing_start_event.record()
 
-        x_indices, y_indices = np.indices((image_width, image_height))
-        sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
         sampled_rays_gpu = cuda.to_device(sampled_rays)
-        density_vectors = cuda.device_array([pixel_count, self.label_assignment_vector_length], dtype=np.float32)
-        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0, pixel_count,
+        density_vectors = cuda.device_array([nonzero_pixel_count, self.label_assignment_vector_length], dtype=np.float32)
+        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0, nonzero_pixel_count,
                                                                                self.label_assignment_vector_length)
 
         self.__extract_densities_along_rays[blockspergrid_rays, self.threads_per_block](camera_to_world, projection_matrix,
                                                                                         distortion_params, sampled_rays_gpu,
-                                                                                        pixel_count, self.xy_resolution,
+                                                                                        nonzero_pixel_count, self.xy_resolution,
                                                                                         self.z_resolution, self.combined_xy_size,
                                                                                         self.combined_z_size, self.combined_origin,
                                                                                         self.combined_index_map, self.combined_hit_count,
@@ -275,6 +284,7 @@ class Gsvom:
         unoccupied_rows = np.where(is_ray_unoccupied)[0]
         density_vectors = np.delete(density_vectors, unoccupied_rows, axis=0)
         sampled_rays = np.delete(sampled_rays, unoccupied_rows, axis=0)
+        sampled_pixel_labels = np.delete(sampled_pixel_labels, unoccupied_rows, axis=0)
 
         raytracing_end_event.record()
         raytracing_end_event.synchronize()
@@ -282,19 +292,37 @@ class Gsvom:
         print(f"Raytracing time: {raytracing_time} ms")
 
         ###### Encode semantic labels in one-hot-fashion ######
-        inference_start_event = cuda.event()
-        inference_end_event = cuda.event()
-        inference_start_event.record()
+        other_inputs_start_event = cuda.event()
+        other_inputs_end_event = cuda.event()
+        other_inputs_start_event.record()
 
-        sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
         num_labels_to_map = sampled_pixel_labels.shape[0]
         label_vectors = np.zeros((num_labels_to_map, self.label_count), dtype=np.float32)
         label_vectors[np.arange(num_labels_to_map), sampled_pixel_labels.squeeze()] = 1
 
+        ###### Get the ray directions ######
+        world_to_cam_rot = camera_to_world[:3, :3].T
+        world_rot = Rotation.from_matrix(world_to_cam_rot)
+        angles = world_rot.as_euler("zxy")
+        angles[0] = 0
+        no_yaw_rot = Rotation.from_euler("zxy", angles)
+        world_to_cam_rot =  no_yaw_rot.as_matrix()
+        directions = self.get_pixel_rotations(projection_matrix, sampled_rays, world_to_cam_rot)
+
+        other_inputs_end_event.record()
+        other_inputs_end_event.synchronize()
+        other_inputs_time = cuda.event_elapsed_time(other_inputs_start_event, other_inputs_end_event)
+        print(f"Other inputs time: {other_inputs_time} ms")
+
         ###### Figure out to which voxels to assign the label ######
+        inference_start_event = cuda.event()
+        inference_end_event = cuda.event()
+        inference_start_event.record()
+
         density_vectors = torch.from_numpy(density_vectors).to(self.torch_device)
         label_vectors = torch.from_numpy(label_vectors).to(self.torch_device)
-        outputs = self.label_association_model(label_vectors, density_vectors)
+        direction_vectors = torch.from_numpy(directions).to(self.torch_device)
+        outputs = self.label_association_model(label_vectors, density_vectors, direction_vectors)
         # Place labels into selected occupied voxels
         place_label = (outputs > self.association_threshold) & (density_vectors > 0)
         place_label = place_label.cpu().numpy()
@@ -544,41 +572,6 @@ class Gsvom:
         map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
         return map_return_tuple
-
-    def reset_map(self):
-        self.combined_index_map = None
-        self.combined_hit_count = None
-        self.combined_total_count = None
-        self.combined_min_height = None
-        self.combined_origin = None
-        self.combined_metrics = None
-        self.combined_cell_count_cpu = None
-        self.combined_labels = None
-        self.combined_timestamps = None
-
-        self.last_combined_index_map = None
-        self.last_combined_hit_count = None
-        self.last_combined_total_count = None
-        self.last_combined_min_height = None
-        self.last_combined_origin = None
-        self.last_combined_metrics = None
-        self.last_combined_cell_count_cpu = None
-        self.last_combined_labels = None
-        self.last_combined_timestamps = None
-        self.last_combined_xy_size = None
-        self.last_combined_z_size = None
-
-        self.height_map = None
-        self.inferred_height_map = None
-        self.roughness_map = None
-        self.guessed_height_delta = None
-        self.voxels_eigenvalues = None
-
-        self.combined_xy_size = self.xy_size
-        self.combined_z_size = self.z_size
-        self.combined_voxel_count = self.combined_xy_size * self.combined_xy_size * self.combined_z_size
-        self.buffer_index = 0
-        self.last_buffer_index = 0
 
     def get_map_as_occupancy_grid(self):
         """ Returns the last combined map as a voxel occupancy grid """
@@ -1071,89 +1064,6 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __expand_binary(input_img, output_img, xy_size, r):
-        """
-            Assumes that both the input and output images contain only 0s and 1s
-        """
-        x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
-            return
-
-        tmp_val = 0.0
-        tmp_count = 0.0
-
-        r_int = int(math.floor(r))
-
-        for i in range(-r_int, r_int + 1):
-            dy = int(math.floor(math.sqrt(r*r - i*i)))
-            if(x + i < 0 or x+i >= xy_size):
-                continue
-            for j in range(-dy, dy + 1):
-                if(y + j < 0 or y+j >= xy_size):
-                    continue
-
-                if(input_img[x+i, y+j] == 1):
-                    output_img[x, y] = 1
-                    return
-
-        output_img[x, y] = 0
-
-    @staticmethod
-    @cuda.jit
-    def __lowpass_binary(input_img, output_img, xy_size, filter_size, filter_fraction):
-        """
-            Assumes that both the input and output images contain only 0s and 1s
-        """
-        x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
-            return
-
-        tmp_val = 0.0
-        tmp_count = 0.0
-
-        if(input_img[x, y] == 0):
-            output_img[x, y] = 0
-            return
-
-        for i in range(-filter_size, filter_size + 1):
-            if(x + i < 0 or x+i >= xy_size):
-                continue
-            for j in range(-filter_size, filter_size + 1):
-                if(y + j < 0 or y+j >= xy_size):
-                    continue
-                tmp_val += input_img[x+i, y+j]*1.0
-                tmp_count += 1.0
-
-        if((tmp_val/tmp_count) >= filter_fraction):
-            output_img[x, y] = 1
-        else:
-            output_img[x, y] = 0
-
-    @staticmethod
-    @cuda.jit
-    def __convolve(input_img, output_img, kernel, xy_size, kernel_size):
-        x, y = cuda.grid(2)
-        if(x >= xy_size or y >= xy_size):
-            return
-
-        r = (kernel_size-1)/2
-
-        tmp_val = 0.0
-
-        for i in range(-r, r+1):
-            x2 = i + r
-            if(x + r < 0 or x+r >= xy_size):
-                continue
-            for j in range(-r, r+1):
-                y2 = j + r
-                if(y + r < 0 or y+r >= xy_size):
-                    continue
-                tmp_val += input_img[x+r, y+r] * kernel[x2, y2]
-
-        output_img[x, y] = tmp_val
-
-    @staticmethod
-    @cuda.jit
     def __combine_metrics(combined_metrics, combined_hit_count, combined_total_count, combined_min_height, combined_index_map,
                           combined_origin, combined_timestamps, old_metrics, old_hit_count, old_total_count, old_min_height,
                           old_index_map, old_origin, old_timestamps, xy_size_old, z_size_old, xy_size_comb, z_size_comb,
@@ -1326,11 +1236,6 @@ class Gsvom:
 
         for channel in range(label_length):
             new_labels[index, channel] = old_labels[index_old, channel]
-
-    @staticmethod
-    @cuda.jit
-    def __combine_2_maps(map1, map2):
-        pass
 
     def __calculate_metrics_master(self, pointcloud, point_count, count, index_map, cell_count_cpu, origin):
         metric_blocks = self.blocks = math.ceil(self.voxel_count / self.threads_per_block)
@@ -1851,6 +1756,43 @@ class Gsvom:
             if buffer_index > -1:
                 for channel in range(label_length):
                     out_label_buffer[buffer_index, channel] = labels[sample_index, channel]
+
+    @staticmethod
+    def get_pixel_rotations(intrinsic_matrix, coordinates, world_to_cam_rot) -> np.ndarray:
+        fx = intrinsic_matrix[0, 0]
+        fy = intrinsic_matrix[1, 1]
+        N = coordinates.shape[0]
+
+        px_x = coordinates[:, 0] - intrinsic_matrix[0, 2]
+        angle_y = np.arctan2(px_x, fx)
+        s_angle_y = np.sin(angle_y)
+        c_angle_y = np.cos(angle_y)
+        y_rot_matrixes = np.zeros((N, 3, 3))
+        y_rot_matrixes[:, 0, 0] = c_angle_y
+        y_rot_matrixes[:, 0, 2] = s_angle_y
+        y_rot_matrixes[:, 1, 1] = 1
+        y_rot_matrixes[:, 2, 0] = -s_angle_y
+        y_rot_matrixes[:, 2, 2] = c_angle_y
+        y_rot_matrixes = np.transpose(y_rot_matrixes, axes=(0, 2, 1))
+
+        hypotenuse = np.sqrt(px_x ** 2 + fx ** 2)
+        hypotenuse_y_size = (fy / fx) * hypotenuse
+        px_y = coordinates[:, 1] - intrinsic_matrix[1, 2]
+        angle_x = np.arctan2(px_y, hypotenuse_y_size)
+        s_angle_x = np.sin(angle_x)
+        c_angle_x = np.cos(angle_x)
+        x_rot_matrixes = np.zeros((N, 3, 3))
+        x_rot_matrixes[:, 0, 0] = 1
+        x_rot_matrixes[:, 1, 1] = c_angle_x
+        x_rot_matrixes[:, 1, 2] = -s_angle_x
+        x_rot_matrixes[:, 2, 1] = s_angle_x
+        x_rot_matrixes[:, 2, 2] = c_angle_x
+        x_rot_matrixes = np.transpose(x_rot_matrixes, axes=(0, 2, 1))
+
+        cam_to_ray_matrixes = np.matmul(x_rot_matrixes, y_rot_matrixes)
+        world_to_ray_matrixes = np.matmul(cam_to_ray_matrixes, world_to_cam_rot)
+        flattened_matrixes = world_to_ray_matrixes.reshape(N, 9).astype(np.float32)
+        return flattened_matrixes
 
     @staticmethod
     @cuda.jit
