@@ -237,7 +237,7 @@ class Gsvom:
 
         image_width = image.shape[0]
         image_height = image.shape[1]
-        camera_to_world = cuda.to_device(camera_to_world)
+        camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
         distortion_params = cuda.to_device(distortion_params)
 
@@ -252,7 +252,6 @@ class Gsvom:
         blockspergrid_ray_num_2d = math.ceil(nonzero_pixel_count / self.threads_per_block_2D[0])
         blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
-        blockspergrid_rays = math.ceil(nonzero_pixel_count / self.threads_per_block)
 
         prep_end_event.record()
         prep_end_event.synchronize()
@@ -269,7 +268,7 @@ class Gsvom:
         self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0, nonzero_pixel_count,
                                                                                self.label_assignment_vector_length)
 
-        self.__extract_densities_along_rays[blockspergrid_rays, self.threads_per_block](camera_to_world, projection_matrix,
+        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix,
                                                                                         distortion_params, sampled_rays_gpu,
                                                                                         nonzero_pixel_count, self.xy_resolution,
                                                                                         self.z_resolution, self.combined_xy_size,
@@ -322,7 +321,7 @@ class Gsvom:
         density_vectors = torch.from_numpy(density_vectors).to(self.torch_device)
         label_vectors = torch.from_numpy(label_vectors).to(self.torch_device)
         direction_vectors = torch.from_numpy(directions).to(self.torch_device)
-        outputs = self.label_association_model(label_vectors, density_vectors, direction_vectors)
+        outputs = self.label_association_model(label_vectors, torch.clone(density_vectors), direction_vectors)
         # Place labels into selected occupied voxels
         place_label = (outputs > self.association_threshold) & (density_vectors > 0)
         place_label = place_label.cpu().numpy()
@@ -343,7 +342,7 @@ class Gsvom:
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
         blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
-        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world,
+        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu,
                                                                                    projection_matrix, distortion_params, sampled_rays_gpu,
                                                                                    num_labels_to_assign, self.xy_resolution,
                                                                                    self.z_resolution, self.combined_xy_size,
@@ -1607,12 +1606,13 @@ class Gsvom:
     def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
                                        xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
                                        total_count_buffer, density_vector_len, out_density_vectors):
-        sample_index = cuda.grid(1)
-        if sample_index >= num_samples:
+        sample_index, voxel_num = cuda.grid(2)
+        if sample_index >= num_samples or voxel_num >= density_vector_len:
             return
 
         px_x = sampled_rays[sample_index, 0]
         px_y = sampled_rays[sample_index, 1]
+
         fx = projection_matrix[0, 0]
         cx = projection_matrix[0, 2]
         fy = projection_matrix[1, 1]
@@ -1656,27 +1656,28 @@ class Gsvom:
             slope_index = 1
         if slope_max == abs(slope[2]):
             slope_index = 2
+
         direction = slope[slope_index] / abs(slope[slope_index])
+        voxel_dist = voxel_num + 1
+        pt[slope_index] += voxel_dist * direction
+        pt[(slope_index + 1) % 3] += voxel_dist * slope[(slope_index + 1) % 3] / abs(slope[slope_index])
+        pt[(slope_index + 2) % 3] += voxel_dist * slope[(slope_index + 2) % 3] / abs(slope[slope_index])
 
-        for voxel_num in range(density_vector_len):
-            pt[slope_index] += direction
-            pt[(slope_index + 1) % 3] += slope[(slope_index + 1) % 3] / abs(slope[slope_index])
-            pt[(slope_index + 2) % 3] += slope[(slope_index + 2) % 3] / abs(slope[slope_index])
+        x_index = math.floor(pt[0] - map_origin[0])
+        if x_index < 0 or x_index >= xy_size:
+            return
+        y_index = math.floor(pt[1] - map_origin[1])
+        if y_index < 0 or y_index >= xy_size:
+            return
+        z_index = math.floor(pt[2] - map_origin[2])
+        if z_index < 0 or z_index >= z_size:
+            return
 
-            x_index = math.floor(pt[0] - map_origin[0])
-            if x_index < 0 or x_index >= xy_size:
-                continue
-            y_index = math.floor(pt[1] - map_origin[1])
-            if y_index < 0 or y_index >= xy_size:
-                continue
-            z_index = math.floor(pt[2] - map_origin[2])
-            if z_index < 0 or z_index >= z_size:
-                continue
+        index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
+        buffer_index = lookup_table[index]
 
-            voxel_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
-            buffer_index = lookup_table[voxel_index]
-            if buffer_index > -1:
-                out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
+        if buffer_index > -1:
+            out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
 
     @staticmethod
     @cuda.jit
