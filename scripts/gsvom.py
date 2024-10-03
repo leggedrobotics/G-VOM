@@ -13,6 +13,10 @@ from association_2d_3d.models.benchmark_multi_voxel import BenchmarkMultiVoxel
 from association_2d_3d.models.benchmark_all_voxels import BenchmarkAllVoxels
 from association_2d_3d.models.model_v1 import ModelV1
 from association_2d_3d.models.model_v6 import ModelV6
+from association_2d_3d.models.model_v7 import ModelV7
+
+from association_2d_3d.feature_extractors.mlp_geom_context import GeomContMlpFeatures
+from association_2d_3d.feature_extractors.conv_geom_context import GeomContConvFeatures
 
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
@@ -70,17 +74,30 @@ class Gsvom:
 
         self.label_length = label_length
         self.label_assignment_vector_length = int(np.ceil(self.xy_size/2))
+        self.geom_feature_length = 16
+        self.geometric_context_size = 9
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # self.label_association_model = BenchmarkSingleVoxel(0.9)
+        # self.label_association_model = BenchmarkSingleVoxel(0.3)
         # self.label_association_model = BenchmarkMultiVoxel(0.1)
+        # self.label_association_model = BenchmarkAllVoxels()
         # self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
-        self.label_association_model = ModelV6(self.label_assignment_vector_length, self.label_count)
+        # self.label_association_model = ModelV6(self.label_assignment_vector_length, self.label_count)
+        self.label_association_model = ModelV7(self.label_assignment_vector_length, self.label_count, self.geom_feature_length)
         self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
+
+        self.feature_extractor = GeomContMlpFeatures(self.geometric_context_size, self.geom_feature_length)
+        self.feature_extractor.load_state_dict(torch.load("../../../data/saved_models/v7/v7_mlp_features_trained.pt"))
+        # self.feature_extractor = GeomContConvFeatures(self.geometric_context_size, self.geom_feature_length)
+        # self.feature_extractor.load_state_dict(torch.load("../../../data/saved_models/v7/v7_conv_features_trained.pt"))
 
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
+        self.label_association_model.half()
+        self.feature_extractor.to(self.torch_device)
+        self.feature_extractor.eval()
+        self.feature_extractor.half()
         self.association_threshold = place_label_threshold
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
@@ -243,9 +260,10 @@ class Gsvom:
 
         x_indices, y_indices = np.indices((image_width, image_height))
         sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
+        sampled_rays = sampled_rays[::2]
         sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
-        sampled_pixel_labels = sampled_pixel_labels[~is_unknown_label]
+        sampled_pixel_labels = torch.from_numpy(sampled_pixel_labels[~is_unknown_label]).to(self.torch_device)
         sampled_rays = sampled_rays[~is_unknown_label, :]
 
         nonzero_pixel_count = sampled_rays.shape[0]
@@ -263,27 +281,49 @@ class Gsvom:
         raytracing_end_event = cuda.event()
         raytracing_start_event.record()
 
-        sampled_rays_gpu = cuda.to_device(sampled_rays)
-        density_vectors = cuda.device_array([nonzero_pixel_count, self.label_assignment_vector_length], dtype=np.float32)
-        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0, nonzero_pixel_count,
+        sampled_rays = cuda.to_device(sampled_rays)
+        density_vectors = cuda.device_array([nonzero_pixel_count, self.label_assignment_vector_length], dtype=np.float16)
+        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0.0, nonzero_pixel_count,
                                                                                self.label_assignment_vector_length)
+        max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
+        num_occupied_voxels = cuda.to_device(np.zeros([1], dtype=np.int32))
+        geometric_context_indexes = cuda.to_device(-torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device))
+        occupied_voxel_coords = cuda.to_device(torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int32, device=self.torch_device))
 
-        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix,
-                                                                                        distortion_params, sampled_rays_gpu,
-                                                                                        nonzero_pixel_count, self.xy_resolution,
-                                                                                        self.z_resolution, self.combined_xy_size,
-                                                                                        self.combined_z_size, self.combined_origin,
-                                                                                        self.combined_index_map, self.combined_hit_count,
-                                                                                        self.combined_total_count,
-                                                                                        self.label_assignment_vector_length,
-                                                                                        density_vectors)
+        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
+                                                                                              sampled_rays, nonzero_pixel_count, self.xy_resolution,
+                                                                                              self.z_resolution, self.combined_xy_size, self.combined_z_size,
+                                                                                              self.combined_origin, self.combined_index_map,
+                                                                                              self.combined_hit_count, self.combined_total_count,
+                                                                                              self.label_assignment_vector_length, max_num_occupied_voxels,
+                                                                                              density_vectors, geometric_context_indexes, occupied_voxel_coords,
+                                                                                              num_occupied_voxels)
+        num_occupied_voxels = num_occupied_voxels.copy_to_host()[0]
+        if num_occupied_voxels > 0:
+            geometric_contexts = cuda.as_cuda_array(torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
+                                                            dtype=torch.float16, device=self.torch_device))
+            threads_per_block_3d = (128, 2, 2)
+            blocks_per_grid_a = int(np.ceil(num_occupied_voxels / threads_per_block_3d[0]))
+            blocks_per_grid_b = int(np.ceil(self.geometric_context_size / threads_per_block_3d[1]))
+            blocks_per_grid_3d = (blocks_per_grid_a, blocks_per_grid_b, blocks_per_grid_b)
+            self.get_geometric_contexts[blocks_per_grid_3d, threads_per_block_3d](occupied_voxel_coords, num_occupied_voxels, self.geometric_context_size,
+                                                                                  self.combined_index_map, self.combined_hit_count, self.combined_total_count,
+                                                                                  self.combined_xy_size, self.combined_z_size, geometric_contexts)
+            geometric_contexts = torch.tensor(geometric_contexts, device=self.torch_device)
+        else:
+            geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
+                                             dtype=torch.float16, device=self.torch_device)
+
         # Remove samples that didn't hit any occupied voxels
-        density_vectors = density_vectors.copy_to_host()
-        is_ray_unoccupied = np.all(density_vectors == 0, axis=1)
-        unoccupied_rows = np.where(is_ray_unoccupied)[0]
-        density_vectors = np.delete(density_vectors, unoccupied_rows, axis=0)
-        sampled_rays = np.delete(sampled_rays, unoccupied_rows, axis=0)
-        sampled_pixel_labels = np.delete(sampled_pixel_labels, unoccupied_rows, axis=0)
+        density_vectors = torch.tensor(density_vectors, device=self.torch_device)
+        gc_indexes = torch.tensor(geometric_context_indexes, device=self.torch_device)
+        sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
+
+        is_ray_unoccupied = torch.all(density_vectors == 0, axis=1)
+        density_vectors = density_vectors[~is_ray_unoccupied, :]
+        gc_indexes = gc_indexes[~is_ray_unoccupied, :]
+        sampled_rays = sampled_rays[~is_ray_unoccupied, :]
+        sampled_pixel_labels = sampled_pixel_labels[~is_ray_unoccupied]
 
         raytracing_end_event.record()
         raytracing_end_event.synchronize()
@@ -295,9 +335,7 @@ class Gsvom:
         other_inputs_end_event = cuda.event()
         other_inputs_start_event.record()
 
-        num_labels_to_map = sampled_pixel_labels.shape[0]
-        label_vectors = np.zeros((num_labels_to_map, self.label_count), dtype=np.float32)
-        label_vectors[np.arange(num_labels_to_map), sampled_pixel_labels.squeeze()] = 1
+        label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze()
 
         ###### Get the ray directions ######
         world_to_cam_rot = camera_to_world[:3, :3].T
@@ -306,6 +344,8 @@ class Gsvom:
         angles[0] = 0
         no_yaw_rot = Rotation.from_euler("zxy", angles)
         world_to_cam_rot =  no_yaw_rot.as_matrix()
+        world_to_cam_rot = torch.from_numpy(world_to_cam_rot).to(self.torch_device).half()
+        projection_matrix = torch.tensor(projection_matrix, device=self.torch_device)
         directions = self.get_pixel_rotations(projection_matrix, sampled_rays, world_to_cam_rot)
 
         other_inputs_end_event.record()
@@ -318,12 +358,13 @@ class Gsvom:
         inference_end_event = cuda.event()
         inference_start_event.record()
 
-        density_vectors = torch.from_numpy(density_vectors).to(self.torch_device)
-        label_vectors = torch.from_numpy(label_vectors).to(self.torch_device)
-        direction_vectors = torch.from_numpy(directions).to(self.torch_device)
-        outputs = self.label_association_model(label_vectors, torch.clone(density_vectors), direction_vectors)
+        if type(self.label_association_model) == ModelV7:
+            geom_features = self.feature_extractor(geometric_contexts)
+            outputs = self.label_association_model(label_vectors, geom_features, directions, gc_indexes)
+        else:
+            outputs = self.label_association_model(label_vectors, torch.clone(density_vectors), directions)
         # Place labels into selected occupied voxels
-        place_label = (outputs > self.association_threshold) & (density_vectors > 0)
+        place_label = outputs > self.association_threshold
         place_label = place_label.cpu().numpy()
 
         inference_end_event.record()
@@ -1605,7 +1646,8 @@ class Gsvom:
     @cuda.jit
     def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
                                        xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
-                                       total_count_buffer, density_vector_len, out_density_vectors):
+                                       total_count_buffer, density_vector_len, max_expected_occupied_voxels, out_density_vectors,
+                                       out_geometric_context_index, out_occupied_voxel_coords, out_occupied_voxel_count):
         sample_index, voxel_num = cuda.grid(2)
         if sample_index >= num_samples or voxel_num >= density_vector_len:
             return
@@ -1678,6 +1720,44 @@ class Gsvom:
 
         if buffer_index > -1:
             out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
+            gc_index = cuda.atomic.add(out_occupied_voxel_count, 0, 1)
+            if gc_index < max_expected_occupied_voxels:
+                out_geometric_context_index[sample_index, voxel_num] = gc_index
+                out_occupied_voxel_coords[gc_index, 0] = x_index
+                out_occupied_voxel_coords[gc_index, 1] = y_index
+                out_occupied_voxel_coords[gc_index, 2] = z_index
+            else:
+                cuda.atomic.add(out_occupied_voxel_count, 0, -1)
+
+    @staticmethod
+    @cuda.jit
+    def get_geometric_contexts(occupied_voxel_coords, num_occupied_voxels, context_size, lookup_table, hit_count_buffer, total_count_buffer, xy_size, z_size,
+                               out_geometric_contexts):
+        voxel_index, col, row = cuda.grid(3)
+        if voxel_index >= num_occupied_voxels or col >= context_size or row >= context_size:
+            return
+
+        center_x = occupied_voxel_coords[voxel_index, 0]
+        center_y = occupied_voxel_coords[voxel_index, 1]
+        center_z = occupied_voxel_coords[voxel_index, 2]
+        origin_offset = context_size // 2
+
+        x_index = center_x - origin_offset + row
+        if x_index < 0 or x_index > xy_size:
+            return
+        y_index = center_y - origin_offset + col
+        if y_index < 0 or y_index > xy_size:
+            return
+
+        for z in range(context_size):
+            z_index = center_z - origin_offset + z
+            if z_index < 0 or z_index > z_size:
+                continue
+
+            position_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
+            buffer_index = lookup_table[position_index]
+            if buffer_index > -1:
+                out_geometric_contexts[voxel_index, row, col, z] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
 
     @staticmethod
     @cuda.jit
@@ -1758,41 +1838,40 @@ class Gsvom:
                 for channel in range(label_length):
                     out_label_buffer[buffer_index, channel] = labels[sample_index, channel]
 
-    @staticmethod
-    def get_pixel_rotations(intrinsic_matrix, coordinates, world_to_cam_rot) -> np.ndarray:
+    def get_pixel_rotations(self, intrinsic_matrix, coordinates, world_to_cam_rot):
         fx = intrinsic_matrix[0, 0]
         fy = intrinsic_matrix[1, 1]
         N = coordinates.shape[0]
 
         px_x = coordinates[:, 0] - intrinsic_matrix[0, 2]
-        angle_y = np.arctan2(px_x, fx)
-        s_angle_y = np.sin(angle_y)
-        c_angle_y = np.cos(angle_y)
-        y_rot_matrixes = np.zeros((N, 3, 3))
+        angle_y = torch.arctan2(px_x, fx)
+        s_angle_y = torch.sin(angle_y)
+        c_angle_y = torch.cos(angle_y)
+        y_rot_matrixes = torch.zeros((N, 3, 3), device=self.torch_device, dtype=torch.float16)
         y_rot_matrixes[:, 0, 0] = c_angle_y
         y_rot_matrixes[:, 0, 2] = s_angle_y
         y_rot_matrixes[:, 1, 1] = 1
         y_rot_matrixes[:, 2, 0] = -s_angle_y
         y_rot_matrixes[:, 2, 2] = c_angle_y
-        y_rot_matrixes = np.transpose(y_rot_matrixes, axes=(0, 2, 1))
+        y_rot_matrixes = y_rot_matrixes.transpose(1, 2)
 
-        hypotenuse = np.sqrt(px_x ** 2 + fx ** 2)
+        hypotenuse = torch.sqrt(px_x ** 2 + fx ** 2)
         hypotenuse_y_size = (fy / fx) * hypotenuse
         px_y = coordinates[:, 1] - intrinsic_matrix[1, 2]
-        angle_x = np.arctan2(px_y, hypotenuse_y_size)
-        s_angle_x = np.sin(angle_x)
-        c_angle_x = np.cos(angle_x)
-        x_rot_matrixes = np.zeros((N, 3, 3))
+        angle_x = torch.arctan2(px_y, hypotenuse_y_size)
+        s_angle_x = torch.sin(angle_x)
+        c_angle_x = torch.cos(angle_x)
+        x_rot_matrixes = torch.zeros((N, 3, 3), device=self.torch_device, dtype=torch.float16)
         x_rot_matrixes[:, 0, 0] = 1
         x_rot_matrixes[:, 1, 1] = c_angle_x
         x_rot_matrixes[:, 1, 2] = -s_angle_x
         x_rot_matrixes[:, 2, 1] = s_angle_x
         x_rot_matrixes[:, 2, 2] = c_angle_x
-        x_rot_matrixes = np.transpose(x_rot_matrixes, axes=(0, 2, 1))
+        x_rot_matrixes = x_rot_matrixes.transpose(1, 2)
 
-        cam_to_ray_matrixes = np.matmul(x_rot_matrixes, y_rot_matrixes)
-        world_to_ray_matrixes = np.matmul(cam_to_ray_matrixes, world_to_cam_rot)
-        flattened_matrixes = world_to_ray_matrixes.reshape(N, 9).astype(np.float32)
+        cam_to_ray_matrixes = torch.matmul(x_rot_matrixes, y_rot_matrixes)
+        world_to_ray_matrixes = torch.matmul(cam_to_ray_matrixes, world_to_cam_rot)
+        flattened_matrixes = world_to_ray_matrixes.reshape(N, 9)
         return flattened_matrixes
 
     @staticmethod
