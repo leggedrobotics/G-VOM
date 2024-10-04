@@ -287,8 +287,8 @@ class Gsvom:
                                                                                self.label_assignment_vector_length)
         max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
         num_occupied_voxels = cuda.to_device(np.zeros([1], dtype=np.int32))
-        geometric_context_indexes = cuda.to_device(-torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device))
-        occupied_voxel_coords = cuda.to_device(torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int32, device=self.torch_device))
+        gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
+        occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int32, device=self.torch_device)
 
         self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
                                                                                               sampled_rays, nonzero_pixel_count, self.xy_resolution,
@@ -296,12 +296,12 @@ class Gsvom:
                                                                                               self.combined_origin, self.combined_index_map,
                                                                                               self.combined_hit_count, self.combined_total_count,
                                                                                               self.label_assignment_vector_length, max_num_occupied_voxels,
-                                                                                              density_vectors, geometric_context_indexes, occupied_voxel_coords,
+                                                                                              density_vectors, gc_indexes, occupied_voxel_coords,
                                                                                               num_occupied_voxels)
         num_occupied_voxels = num_occupied_voxels.copy_to_host()[0]
         if num_occupied_voxels > 0:
-            geometric_contexts = cuda.as_cuda_array(torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
-                                                            dtype=torch.float16, device=self.torch_device))
+            geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
+                                                            dtype=torch.float16, device=self.torch_device)
             threads_per_block_3d = (128, 2, 2)
             blocks_per_grid_a = int(np.ceil(num_occupied_voxels / threads_per_block_3d[0]))
             blocks_per_grid_b = int(np.ceil(self.geometric_context_size / threads_per_block_3d[1]))
@@ -309,14 +309,12 @@ class Gsvom:
             self.get_geometric_contexts[blocks_per_grid_3d, threads_per_block_3d](occupied_voxel_coords, num_occupied_voxels, self.geometric_context_size,
                                                                                   self.combined_index_map, self.combined_hit_count, self.combined_total_count,
                                                                                   self.combined_xy_size, self.combined_z_size, geometric_contexts)
-            geometric_contexts = torch.tensor(geometric_contexts, device=self.torch_device)
         else:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                              dtype=torch.float16, device=self.torch_device)
 
         # Remove samples that didn't hit any occupied voxels
         density_vectors = torch.tensor(density_vectors, device=self.torch_device)
-        gc_indexes = torch.tensor(geometric_context_indexes, device=self.torch_device)
         sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
 
         is_ray_unoccupied = torch.all(density_vectors == 0, axis=1)
