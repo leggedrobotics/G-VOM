@@ -6,18 +6,6 @@ import threading
 import torch
 from scipy.spatial.transform import Rotation
 
-# [WARNING] This connects gvom to the code of Hynek Zamazal's master's thesis in leggedrobotics/semantic_mapping.
-# TODO: Before using this implementation, this needs to be addressed
-from association_2d_3d.models.benchmark_single_voxel import BenchmarkSingleVoxel
-from association_2d_3d.models.benchmark_multi_voxel import BenchmarkMultiVoxel
-from association_2d_3d.models.benchmark_all_voxels import BenchmarkAllVoxels
-from association_2d_3d.models.model_v1 import ModelV1
-from association_2d_3d.models.model_v6 import ModelV6
-from association_2d_3d.models.model_v7 import ModelV7
-
-from association_2d_3d.feature_extractors.mlp_geom_context import GeomContMlpFeatures
-from association_2d_3d.feature_extractors.conv_geom_context import GeomContConvFeatures
-
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
 
@@ -42,15 +30,17 @@ class Gsvom:
     z_eigen_dist:                   The number of voxels in the z direction used to calculate eigen values of point distribution
     label_length:                   The dimension of the semantic label used
     num_labels:                     Number of possible semantic labels
-    association_model_weight_path:  Path to a file where the pretrained weights of the label association model weights are stored
+    semantic_assignment_distance:   How many voxels in front of the camera should be considered for semantic label assignment
+    association_model:              A torch NN used for image feature to voxel map association
+    geometric_feature_extractor:    A torch NN used to extract geometric features from geometric contexts
     place_label_threshold:          If the label association model output is higher than this, the label is associated with the voxel in question
     use_dynamic_global_map:         If the map pointclouds get integrated to should move with the robot, or stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
-                 xy_eigen_dist, z_eigen_dist, label_length, num_labels, association_model_weight_path, place_label_threshold,
-                 use_dynamic_combined_map):
+                 xy_eigen_dist, z_eigen_dist, label_length, num_labels, semantic_assignment_distance, geometric_context_size, association_model,
+                 geometric_feature_extractor, place_label_threshold, use_dynamic_combined_map):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -73,32 +63,21 @@ class Gsvom:
         self.z_eigen_dist = z_eigen_dist
 
         self.label_length = label_length
-        self.label_assignment_vector_length = int(np.ceil(self.xy_size/2))
-        self.geom_feature_length = 16
-        self.geometric_context_size = 9
+        self.label_assignment_vector_length = semantic_assignment_distance
+        self.geometric_context_size = geometric_context_size
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.association_threshold = place_label_threshold
 
-        # self.label_association_model = BenchmarkSingleVoxel(0.3)
-        # self.label_association_model = BenchmarkMultiVoxel(0.1)
-        # self.label_association_model = BenchmarkAllVoxels()
-        # self.label_association_model = ModelV1(self.label_assignment_vector_length, self.label_count)
-        # self.label_association_model = ModelV6(self.label_assignment_vector_length, self.label_count)
-        self.label_association_model = ModelV7(self.label_assignment_vector_length, self.label_count, self.geom_feature_length)
-        self.label_association_model.load_state_dict(torch.load(association_model_weight_path))
-
-        self.feature_extractor = GeomContMlpFeatures(self.geometric_context_size, self.geom_feature_length)
-        self.feature_extractor.load_state_dict(torch.load("../../../data/saved_models/v7/v7_mlp_features_trained.pt"))
-        # self.feature_extractor = GeomContConvFeatures(self.geometric_context_size, self.geom_feature_length)
-        # self.feature_extractor.load_state_dict(torch.load("../../../data/saved_models/v7/v7_conv_features_trained.pt"))
-
+        self.label_association_model = association_model
+        self.feature_extractor = geometric_feature_extractor
         self.label_association_model.to(self.torch_device)
         self.label_association_model.eval()
         self.label_association_model.half()
-        self.feature_extractor.to(self.torch_device)
-        self.feature_extractor.eval()
-        self.feature_extractor.half()
-        self.association_threshold = place_label_threshold
+        if not self.feature_extractor is None:
+            self.feature_extractor.to(self.torch_device)
+            self.feature_extractor.eval()
+            self.feature_extractor.half()
 
         self.metrics_count = 10 # Mean: x, y, z; Covariance: xx, xy, xz, yy, yz, zz; Covariance point count
         self.metrics = cuda.to_device(np.array([[3, 2]]))
@@ -356,7 +335,7 @@ class Gsvom:
         inference_end_event = cuda.event()
         inference_start_event.record()
 
-        if type(self.label_association_model) == ModelV7:
+        if not self.feature_extractor is None:
             geom_features = self.feature_extractor(geometric_contexts)
             outputs = self.label_association_model(label_vectors, geom_features, directions, gc_indexes)
         else:
