@@ -362,8 +362,8 @@ class Gsvom:
         else:
             outputs = self.label_association_model(label_vectors, torch.clone(density_vectors), directions)
         # Place labels into selected occupied voxels
-        place_label = outputs > self.association_threshold
-        place_label = place_label.cpu().numpy()
+        outputs = outputs > self.association_threshold
+        outputs = outputs.cpu().numpy()
 
         inference_end_event.record()
         inference_end_event.synchronize()
@@ -375,8 +375,8 @@ class Gsvom:
         placement_end_event = cuda.event()
         placement_start_event.record()
 
-        num_labels_to_assign = place_label.shape[0]
-        place_label = cuda.to_device(place_label)
+        num_labels_to_assign = outputs.shape[0]
+        outputs = cuda.to_device(outputs)
         sampled_rays_gpu = cuda.to_device(sampled_rays)
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
@@ -387,7 +387,7 @@ class Gsvom:
                                                                                    self.z_resolution, self.combined_xy_size,
                                                                                    self.combined_z_size, self.combined_origin,
                                                                                    self.combined_index_map,
-                                                                                   self.label_assignment_vector_length, place_label,
+                                                                                   self.label_assignment_vector_length, outputs,
                                                                                    self.label_length, self.combined_labels)
 
         placement_end_event.record()
