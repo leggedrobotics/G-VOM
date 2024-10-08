@@ -5,7 +5,6 @@ import math
 import threading
 import torch
 from scipy.spatial.transform import Rotation
-import rospy
 
 # Don't print warnings about GPU underutilization to keep the terminal clean
 config.CUDA_LOW_OCCUPANCY_WARNINGS = False
@@ -1317,7 +1316,10 @@ class Gsvom:
         if i < point_count:
             
             # Check the point is not too close to the robot
-            d2 = points[i, 0]*points[i, 0] + points[i, 1]*points[i, 1] + points[i, 2]*points[i, 2]
+            dist_x = points[i, 0] - ego_position[0]
+            dist_y = points[i, 1] - ego_position[1]
+            dist_z = points[i, 2] - ego_position[2]
+            d2 = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z
             if d2 < min_distance*min_distance:
                 return
 

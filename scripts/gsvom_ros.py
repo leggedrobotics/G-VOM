@@ -37,7 +37,7 @@ class VoxelMapper:
         self.max_roughness = rospy.get_param("~max_roughness", 0)
         self.robot_height = rospy.get_param("~robot_height", 1.0)
         self.robot_radius = rospy.get_param("~robot_radius", 0.75)
-        self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.75)
+        self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.6)
         self.freq = rospy.get_param("~freq", 10.0) # Hz
         self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist", 1)
         self.z_eigen_dist = rospy.get_param("~z_eigen_dist", 1)
