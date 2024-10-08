@@ -34,7 +34,7 @@ class Gsvom:
     association_model:              A torch NN used for image feature to voxel map association
     geometric_feature_extractor:    A torch NN used to extract geometric features from geometric contexts
     place_label_threshold:          If the label association model output is higher than this, the label is associated with the voxel in question
-    use_dynamic_global_map:         If the map pointclouds get integrated to should move with the robot, or stay static and change size
+    use_dynamic_global_map:         If true the map pointclouds get integrated to will move with the robot, otherwise it will stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,

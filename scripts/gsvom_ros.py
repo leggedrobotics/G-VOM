@@ -7,7 +7,6 @@ from sensor_msgs.msg import PointCloud2
 import tf2_ros
 import tf
 import ros_numpy
-import time
 
 
 class VoxelMapper:
@@ -19,6 +18,7 @@ class VoxelMapper:
         self.tf_listener = tf2_ros.TransformListener(self.tfBuffer)
         self.tf_transformer = tf.TransformerROS()
 
+        # Standard G-VOM parameters
         self.odom_frame = rospy.get_param("~odom_frame", "/camera_init")
         self.xy_resolution = rospy.get_param("~xy_resolution", 0.15)
         self.z_resolution = rospy.get_param("~z_resolution", 0.15)
@@ -37,8 +37,16 @@ class VoxelMapper:
         self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.75)
         self.freq = rospy.get_param("~freq", 10.0) # Hz
         self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist", 1)
-        self.z_eigen_dist = rospy.get_param("~z_eigen_dist",1 )
-        
+        self.z_eigen_dist = rospy.get_param("~z_eigen_dist", 1)
+        # Semantics parameters
+        semantic_label_length = 1
+        number_of_semantic_labels = 52
+        semantic_assignment_distance = 128
+        geometric_context_size = 9
+        association_model = None
+        geometric_feature_extractor = None
+        place_label_threshold = 0.0
+        use_dynamic_combined_map = True
         
         self.voxel_mapper = gsvom.Gsvom(
             self.xy_resolution,
@@ -54,7 +62,15 @@ class VoxelMapper:
             self.robot_radius,
             self.ground_to_lidar_height,
             self.xy_eigen_dist,
-            self.z_eigen_dist
+            self.z_eigen_dist,
+            semantic_label_length,
+            number_of_semantic_labels,
+            semantic_assignment_distance,
+            geometric_context_size,
+            association_model,
+            geometric_feature_extractor,
+            place_label_threshold,
+            use_dynamic_combined_map
         )
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
