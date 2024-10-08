@@ -48,10 +48,10 @@ class VoxelMapper:
         geometric_context_size = 9
         use_dynamic_combined_map = True
 
-        model_type = rospy.get_param("~association_model_type", "Single")
-        model_weights_path = rospy.get_param("~association_model_weights_path", "")
-        geometric_feature_type = rospy.get_param("~geometric_feature_tyepe", "mlp")
-        feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path", "")
+        model_type = rospy.get_param("~association_model_type")
+        model_weights_path = rospy.get_param("~association_model_weights_path")
+        geometric_feature_type = rospy.get_param("~geometric_feature_type")
+        feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
         association_model, feature_extractor, place_label_threshold = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
                                                                                         geometric_feature_type, feature_extractor_weights_path)
         

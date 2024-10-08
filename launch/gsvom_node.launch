@@ -1,0 +1,8 @@
+<launch>
+    <node pkg="gvom" type="gsvom_ros.py" name="gsvom_ros" output="screen">
+        <param name="~association_model_type" value="v7"/>
+        <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v7_trained_w_mlp.pt"/>
+        <param name="~geometric_feature_type" value="mlp"/>
+        <param name="~feature_extractor_weights_path" value="$(find gvom)/model_weights/v7_mlp_features_trained.pt"/>
+    </node>
+</launch>
