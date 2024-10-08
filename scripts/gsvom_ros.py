@@ -22,12 +22,12 @@ class VoxelMapper:
         self.tf_transformer = tf.TransformerROS()
 
         # Standard G-VOM parameters
-        self.odom_frame = rospy.get_param("~odom_frame", "/camera_init")
+        self.odom_frame = rospy.get_param("~odom_frame", "odom")
         self.xy_resolution = rospy.get_param("~xy_resolution", 0.15)
         self.z_resolution = rospy.get_param("~z_resolution", 0.15)
         self.width = rospy.get_param("~width", 256)
         self.height = rospy.get_param("~height", 64)
-        self.buffer_size = rospy.get_param("~buffer_size", 4)
+        self.buffer_size = rospy.get_param("~buffer_size", 1)
         self.min_point_distance = rospy.get_param("~min_point_distance", 1.0)
         self.positive_obstacle_threshold = rospy.get_param("~positive_obstacle_threshold", 0.50)
         self.negative_obstacle_threshold = rospy.get_param("~negative_obstacle_threshold", 0.5)
@@ -122,7 +122,7 @@ class VoxelMapper:
 
         tf_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
-        self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix)
+        self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
@@ -192,6 +192,7 @@ class VoxelMapper:
         if voxel_inf_hm is not None:
             voxel_inf_hm = np.core.records.fromarrays([voxel_inf_hm[:,0], voxel_inf_hm[:,1], voxel_inf_hm[:,2]], names='x,y,z')
             self.voxel_inf_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_inf_hm, rospy.Time.now(), self.odom_frame))
+        rospy.loginfo("[G-SVOM] Published maps!")
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')
