@@ -1,12 +1,15 @@
 #!/usr/bin/env python
-import rospy
 import numpy as np
-import gsvom
+
+import rospy
 from nav_msgs.msg import Odometry, OccupancyGrid
 from sensor_msgs.msg import PointCloud2
 import tf2_ros
 import tf
 import ros_numpy
+
+import gsvom
+from semantic_association.model_v1 import ModelV1
 
 
 class VoxelMapper:
@@ -43,7 +46,7 @@ class VoxelMapper:
         number_of_semantic_labels = 52
         semantic_assignment_distance = 128
         geometric_context_size = 9
-        association_model = None
+        association_model = ModelV1(semantic_assignment_distance, number_of_semantic_labels)
         geometric_feature_extractor = None
         place_label_threshold = 0.0
         use_dynamic_combined_map = True
