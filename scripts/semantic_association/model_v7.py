@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from association_2d_3d.feature_extractors.positional_encodings import get_sinusoidal_pe
+import math
 
 
 '''
@@ -19,10 +19,15 @@ class ModelV7(nn.Module):
         self.layer2 = nn.Linear(1024, 512)
         self.layer3 = nn.Linear(512, self.geometric_context_length)
 
-        raw_positional_embedding = get_sinusoidal_pe(self.geometric_context_length)[:, 0]
+        pe_dim = 2
+        position = torch.arange(self.geometric_context_length).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, pe_dim, 2) * (-math.log(10000.0) / pe_dim))
+        raw_positional_embedding = torch.zeros(self.geometric_context_length, pe_dim)
+        raw_positional_embedding[:, 0::2] = torch.sin(position * div_term)
+        raw_positional_embedding[:, 1::2] = torch.cos(position * div_term)
         self.positional_embedding = torch.repeat_interleave(raw_positional_embedding, repeats=geom_feature_length)
 
-    def forward(self, semantic_label, geometric_features, ray_direction, context_map, output_guess=None):
+    def forward(self, semantic_label, geometric_features, ray_direction, context_map):
         batch_size = semantic_label.shape[0]
         device = next(self.parameters()).device
 

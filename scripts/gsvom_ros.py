@@ -9,7 +9,7 @@ import tf
 import ros_numpy
 
 import gsvom
-from semantic_association.model_v1 import ModelV1
+from semantic_association.association_models_factory import get_trained_model
 
 
 class VoxelMapper:
@@ -46,10 +46,14 @@ class VoxelMapper:
         number_of_semantic_labels = 52
         semantic_assignment_distance = 128
         geometric_context_size = 9
-        association_model = ModelV1(semantic_assignment_distance, number_of_semantic_labels)
-        geometric_feature_extractor = None
-        place_label_threshold = 0.0
         use_dynamic_combined_map = True
+
+        model_type = rospy.get_param("~association_model_type", "Single")
+        model_weights_path = rospy.get_param("~association_model_weights_path", "")
+        geometric_feature_type = rospy.get_param("~geometric_feature_tyepe", "mlp")
+        feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path", "")
+        association_model, feature_extractor, place_label_threshold = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
+                                                                                        geometric_feature_type, feature_extractor_weights_path)
         
         self.voxel_mapper = gsvom.Gsvom(
             self.xy_resolution,
@@ -71,10 +75,9 @@ class VoxelMapper:
             semantic_assignment_distance,
             geometric_context_size,
             association_model,
-            geometric_feature_extractor,
+            feature_extractor,
             place_label_threshold,
-            use_dynamic_combined_map
-        )
+            use_dynamic_combined_map)
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
