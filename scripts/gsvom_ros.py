@@ -26,8 +26,8 @@ class VoxelMapper:
                                           [0.0, 1.0, 10.0],
                                           [0.0, 0.0, 1.0]])
         self.distortion_parameters = [0.0, 0.0, 0.0, 0.0]
-        self.camera_frame = "/hdr_front"
-        self.camera_to_world_transform = None
+        self.camera_to_world_transform_matrix = None
+        self.camera_image = None
 
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -109,7 +109,8 @@ class VoxelMapper:
         self.a_certainty_pub = rospy.Publisher("~all_ground_certainty_map", OccupancyGrid, queue_size=1)
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
-        self.timer = rospy.Timer(rospy.Duration(1./self.freq), self.cb_timer)
+        self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
+        self.semantics_merge_timer = rospy.Timer(rospy.Duration(secs=3), self.cb_semantics_timer)
         
         self.lidar_debug_pub = rospy.Publisher('~debug/lidar', PointCloud2, queue_size=1)
         self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
@@ -127,33 +128,36 @@ class VoxelMapper:
         robot_pos = self.robot_position
         lidar_frame = data.header.frame_id
         trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp, rospy.Duration(1))
-
         translation = np.zeros([3])
         translation[0] = trans.transform.translation.x
         translation[1] = trans.transform.translation.y
         translation[2] = trans.transform.translation.z
-
         rotation = np.zeros([4])
         rotation[0] = trans.transform.rotation.x
         rotation[1] = trans.transform.rotation.y
         rotation[2] = trans.transform.rotation.z
         rotation[3] = trans.transform.rotation.w
-
         tf_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
+
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_image(self, data):
         data_array = np.frombuffer(data.data, dtype=np.uint8)
-        cv_image = cv2.imdecode(data_array, cv2.IMREAD_COLOR)
-        cv_image = cv2.resize(cv_image, (0, 0), fx=self.image_scaling_factor, fy=self.image_scaling_factor)
-        scaled_intrinsic_matrix = self.image_scaling_factor*self.intrinsic_matrix
-        scaled_intrinsic_matrix[2, 2] = 1.0
+        self.camera_image = cv2.imdecode(data_array, cv2.IMREAD_COLOR)
 
-        segmented_image = self.segment_image(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
-        cv2.imshow("Received image", cv_image)
-        cv2.waitKey(50)
-        rospy.loginfo(f"Fofof")
+        camera_frame = data.header.frame_id
+        camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
+        translation = np.zeros([3])
+        translation[0] = camera_to_world_trans.transform.translation.x
+        translation[1] = camera_to_world_trans.transform.translation.y
+        translation[2] = camera_to_world_trans.transform.translation.z
+        rotation = np.zeros([4])
+        rotation[0] = camera_to_world_trans.transform.rotation.x
+        rotation[1] = camera_to_world_trans.transform.rotation.y
+        rotation[2] = camera_to_world_trans.transform.rotation.z
+        rotation[3] = camera_to_world_trans.transform.rotation.w
+        self.camera_to_world_transform_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
 
     def segment_image(self, image_array):
         image = Image.fromarray(image_array, mode="RGB")
@@ -184,7 +188,21 @@ class VoxelMapper:
             rospy.logerr(f"[G-SVOM] Semantic segmentation request failed with code {ret_val.status_code} and message '{ret_val.reason}'")
             return None
 
-    def cb_timer(self, event):
+    def cb_semantics_timer(self, event):
+        if self.camera_image is None:
+            rospy.loginfo(f"[G-SVOM] No image available, skipping semantics merging")
+        if self.camera_to_world_transform_matrix is None:
+            rospy.loginfo(f"[G-SVOM] No extrinsic matrix available, skipping semantics merging")
+
+        cv_image = cv2.resize(self.camera_image, (0, 0), fx=self.image_scaling_factor, fy=self.image_scaling_factor)
+        scaled_intrinsic_matrix = self.image_scaling_factor * self.intrinsic_matrix
+        scaled_intrinsic_matrix[2, 2] = 1.0
+
+        segmented_image = self.segment_image(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+        if segmented_image is None:
+            return
+
+    def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
         if map_data is None:
             rospy.loginfo("map_data is None. returning.")
