@@ -1,4 +1,5 @@
 import numba
+import rospy
 from numba import cuda, config
 import numpy as np
 import math
@@ -221,18 +222,18 @@ class Gsvom:
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
 
-    def process_semantics(self, image, projection_matrix, camera_to_world, distortion_params):
+    def process_semantics(self, segmented_image, projection_matrix, camera_to_world, distortion_params):
         """ Assign semantic labels from image to the voxel map"""
         if self.combined_origin is None:
-            print("[ERROR] There is no combined map to merge the semantics into! Nothing will happen.")
+            print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
         prep_start_event = cuda.event()
         prep_end_event = cuda.event()
         prep_start_event.record()
 
-        image_width = image.shape[0]
-        image_height = image.shape[1]
+        image_width = segmented_image.shape[0]
+        image_height = segmented_image.shape[1]
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
         distortion_params = cuda.to_device(distortion_params)
@@ -240,12 +241,15 @@ class Gsvom:
         x_indices, y_indices = np.indices((image_width, image_height))
         sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
         sampled_rays = sampled_rays[::2]
-        sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
+        sampled_pixel_labels = segmented_image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
         sampled_pixel_labels = torch.from_numpy(sampled_pixel_labels[~is_unknown_label]).to(self.torch_device)
         sampled_rays = sampled_rays[~is_unknown_label, :]
 
         nonzero_pixel_count = sampled_rays.shape[0]
+        if nonzero_pixel_count == 0:
+            print("[WARN] There are no pixels with known labels in the image. Nothing will happen")
+            return
         blockspergrid_ray_num_2d = math.ceil(nonzero_pixel_count / self.threads_per_block_2D[0])
         blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
@@ -1697,7 +1701,6 @@ class Gsvom:
 
         index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
         buffer_index = lookup_table[index]
-
         if buffer_index > -1:
             out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
             gc_index = cuda.atomic.add(out_occupied_voxel_count, 0, 1)

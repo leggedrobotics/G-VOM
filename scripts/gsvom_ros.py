@@ -193,6 +193,8 @@ class VoxelMapper:
             rospy.loginfo(f"[G-SVOM] No image available, skipping semantics merging")
         if self.camera_to_world_transform_matrix is None:
             rospy.loginfo(f"[G-SVOM] No extrinsic matrix available, skipping semantics merging")
+        if self.intrinsic_matrix is None or self.distortion_parameters is None:
+            rospy.loginfo(f"[G-SVOM] No intrinsic camera parameters available, skipping semantics merging")
 
         cv_image = cv2.resize(self.camera_image, (0, 0), fx=self.image_scaling_factor, fy=self.image_scaling_factor)
         scaled_intrinsic_matrix = self.image_scaling_factor * self.intrinsic_matrix
@@ -201,6 +203,8 @@ class VoxelMapper:
         segmented_image = self.segment_image(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
         if segmented_image is None:
             return
+
+        self.voxel_mapper.process_semantics(segmented_image, scaled_intrinsic_matrix, self.camera_to_world_transform_matrix, self.distortion_parameters)
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
