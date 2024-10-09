@@ -15,6 +15,8 @@ import ros_numpy
 
 import gsvom
 from semantic_association.association_models_factory import get_trained_model
+# from image_processing.inpainting import get_color_palette
+# from image_processing.detectron_visualizer import Visualizer
 
 
 class VoxelMapper:
@@ -96,6 +98,11 @@ class VoxelMapper:
         self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl', 'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard', 'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf', 'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
         self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
         self.image_scaling_factor = 0.2
+        self.merging_semantics = False
+
+        # color_palette = get_color_palette("data/seg_rgbs.txt")
+        # self.labels_metadata = {"label_names": self.segmentation_classes, "label_colors": color_palette}
+        # self.file_counter = 0
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
@@ -122,6 +129,8 @@ class VoxelMapper:
 
     def cb_lidar(self, data):
         if self.robot_position is None:
+            return
+        if self.merging_semantics:
             return
 
         robot_pos = self.robot_position
@@ -188,6 +197,7 @@ class VoxelMapper:
             return None
 
     def cb_semantics_timer(self, event):
+        self.merging_semantics = True
         if self.camera_image is None:
             rospy.loginfo(f"[G-SVOM] No image available, skipping semantics merging")
         if self.camera_to_world_transform_matrix is None:
@@ -197,7 +207,7 @@ class VoxelMapper:
 
         new_height = int(self.image_scaling_factor*self.camera_image.shape[0])
         new_width = int(self.image_scaling_factor*self.camera_image.shape[1])
-        cv_image = cv2.resize(self.camera_image, (new_height, new_width))
+        cv_image = cv2.resize(self.camera_image, (new_width, new_height))
         scaled_intrinsic_matrix = self.image_scaling_factor * self.intrinsic_matrix
         scaled_intrinsic_matrix[2, 2] = 1.0
 
@@ -205,7 +215,14 @@ class VoxelMapper:
         if segmented_image is None:
             return
 
+        # vis = Visualizer(cv_image, self.labels_metadata)
+        # output = vis.draw_sem_seg(segmented_image, alpha=0.3).get_image()
+        # cv2.imwrite("segmented_image" + str(self.file_counter) + ".png", output)
+        # rospy.loginfo("boop")
+        # self.file_counter += 1
+
         self.voxel_mapper.process_semantics(segmented_image, scaled_intrinsic_matrix, self.camera_to_world_transform_matrix, self.distortion_parameters)
+        self.merging_semantics = False
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
