@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 import numpy as np
+import cv2
+from PIL import Image
+import io
+import requests
+import base64
 
 import rospy
 from nav_msgs.msg import Odometry, OccupancyGrid
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, CompressedImage
 import tf2_ros
 import tf
 import ros_numpy
@@ -14,8 +19,16 @@ from semantic_association.association_models_factory import get_trained_model
 
 class VoxelMapper:
     def __init__(self):
-
         self.robot_position = None
+
+        # TODO: Update this to Nones to be safe from doing unexpected things
+        self.intrinsic_matrix = np.array([[0.0, 1.0, 10.0],
+                                          [0.0, 1.0, 10.0],
+                                          [0.0, 0.0, 1.0]])
+        self.distortion_parameters = [0.0, 0.0, 0.0, 0.0]
+        self.camera_frame = "/hdr_front"
+        self.camera_to_world_transform = None
+
 
         self.tfBuffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tfBuffer)
@@ -79,8 +92,14 @@ class VoxelMapper:
             place_label_threshold,
             use_dynamic_combined_map)
 
+        self.segmentation_server_address = rospy.get_param("~segmentation_server")
+        self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl', 'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard', 'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf', 'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
+        self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
+        self.image_scaling_factor = 0.2
+
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
+        self.sub_image = rospy.Subscriber("~image", CompressedImage, self.cb_image, queue_size=1)
         
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
@@ -123,6 +142,47 @@ class VoxelMapper:
         tf_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
+
+    def cb_image(self, data):
+        data_array = np.frombuffer(data.data, dtype=np.uint8)
+        cv_image = cv2.imdecode(data_array, cv2.IMREAD_COLOR)
+        cv_image = cv2.resize(cv_image, (0, 0), fx=self.image_scaling_factor, fy=self.image_scaling_factor)
+        scaled_intrinsic_matrix = self.image_scaling_factor*self.intrinsic_matrix
+        scaled_intrinsic_matrix[2, 2] = 1.0
+
+        segmented_image = self.segment_image(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
+        cv2.imshow("Received image", cv_image)
+        cv2.waitKey(50)
+        rospy.loginfo(f"Fofof")
+
+    def segment_image(self, image_array):
+        image = Image.fromarray(image_array, mode="RGB")
+        img_io = io.BytesIO()
+        image.save(img_io, 'PNG')
+        img_io.seek(0)
+
+        image_files = {"image": ('image.png', img_io, 'image/png')}
+        other_data = {'return_all_categories': 'False', "vocab": self.segmentation_classes_str}
+
+        ret_val = requests.post(self.segmentation_server_address, files=image_files, data=other_data)
+        if ret_val.status_code == 200:
+            ret_val = ret_val.json()
+            shape = ret_val["shape"][1:]
+            decoded_bytes = base64.b64decode(ret_val["sem_seg"])
+            seg_im = np.frombuffer(decoded_bytes, dtype=int).reshape(shape)
+
+            output_labels = ret_val['vocabulary']
+            N = len(output_labels)
+            filtered_label_map = np.zeros(N, dtype=int)
+            for idx, label in enumerate(output_labels):
+                filtered_label_map[idx] = self.segmentation_classes.index(label)
+            filtered_label_seg = np.zeros_like(seg_im)
+            filtered_label_seg[seg_im != N] = filtered_label_map[seg_im[seg_im != N]]
+
+            return filtered_label_seg
+        else:
+            rospy.logerr(f"[G-SVOM] Semantic segmentation request failed with code {ret_val.status_code} and message '{ret_val.reason}'")
+            return None
 
     def cb_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()

@@ -2,10 +2,13 @@
     <node pkg="gvom" type="gsvom_ros.py" name="gsvom_ros" output="screen">
     	<remap from="~cloud" to="/gt_box/livox/lidar" />
     	<remap from="~odom" to="/state_estimator/odometry" />
+    	<remap from="~image" to="/gt_box/hdr_front/image_raw/compressed" />
     	
         <param name="~association_model_type" value="v7"/>
         <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v7_trained_w_mlp.pt"/>
         <param name="~geometric_feature_type" value="mlp"/>
         <param name="~feature_extractor_weights_path" value="$(find gvom)/model_weights/v7_mlp_features_trained.pt"/>
+        
+        <param name="~segmentation_server" value="http://127.0.0.1:7860/predict"/>
     </node>
 </launch>
