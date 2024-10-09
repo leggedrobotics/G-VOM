@@ -122,7 +122,6 @@ class VoxelMapper:
 
     def cb_lidar(self, data):
         if self.robot_position is None:
-            print("no odom")
             return
 
         robot_pos = self.robot_position
@@ -196,7 +195,9 @@ class VoxelMapper:
         if self.intrinsic_matrix is None or self.distortion_parameters is None:
             rospy.loginfo(f"[G-SVOM] No intrinsic camera parameters available, skipping semantics merging")
 
-        cv_image = cv2.resize(self.camera_image, (0, 0), fx=self.image_scaling_factor, fy=self.image_scaling_factor)
+        new_height = int(self.image_scaling_factor*self.camera_image.shape[0])
+        new_width = int(self.image_scaling_factor*self.camera_image.shape[1])
+        cv_image = cv2.resize(self.camera_image, (new_height, new_width))
         scaled_intrinsic_matrix = self.image_scaling_factor * self.intrinsic_matrix
         scaled_intrinsic_matrix[2, 2] = 1.0
 
