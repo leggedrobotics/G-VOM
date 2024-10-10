@@ -262,10 +262,9 @@ class Gsvom:
         sampled_rays = cuda.to_device(sampled_rays)
         density_vectors = torch.zeros((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.float16, device=self.torch_device)
         max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
-        num_occupied_voxels = cuda.to_device(np.zeros([1], dtype=np.int32))
+        num_occupied_voxels = torch.zeros(1, dtype=torch.int32, device=self.torch_device)
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
         occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
-
         self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
                                                                                               sampled_rays, nonzero_pixel_count, self.xy_resolution,
                                                                                               self.z_resolution, self.combined_xy_size, self.combined_z_size,
@@ -274,7 +273,7 @@ class Gsvom:
                                                                                               self.label_assignment_vector_length, max_num_occupied_voxels,
                                                                                               density_vectors, gc_indexes, occupied_voxel_coords,
                                                                                               num_occupied_voxels)
-        num_occupied_voxels = num_occupied_voxels.copy_to_host()[0]
+        num_occupied_voxels = num_occupied_voxels.item()
         if num_occupied_voxels > 0:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                                             dtype=torch.float16, device=self.torch_device)
@@ -352,6 +351,8 @@ class Gsvom:
         placement_start_event.record()
 
         num_labels_to_assign = outputs.shape[0]
+        if num_labels_to_assign == 0:
+            return
         outputs = cuda.to_device(outputs)
         sampled_rays = cuda.to_device(sampled_rays)
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
