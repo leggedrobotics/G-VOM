@@ -8,15 +8,14 @@ import base64
 
 import rospy
 from nav_msgs.msg import Odometry, OccupancyGrid
-from sensor_msgs.msg import PointCloud2, CompressedImage
+from sensor_msgs.msg import PointCloud2, Image
 import tf2_ros
 import tf
 import ros_numpy
+from cv_bridge import CvBridge
 
 import gsvom
 from semantic_association.association_models_factory import get_trained_model
-# from image_processing.inpainting import get_color_palette
-# from image_processing.detectron_visualizer import Visualizer
 
 
 class VoxelMapper:
@@ -29,7 +28,7 @@ class VoxelMapper:
                                           [0.0, 0.0, 1.0]])
         self.distortion_parameters = [0.0, 0.0, 0.0, 0.0]
         self.camera_to_world_transform_matrix = None
-        self.camera_image = None
+        self.segmented_image = None
 
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -95,18 +94,17 @@ class VoxelMapper:
             use_dynamic_combined_map)
 
         self.segmentation_server_address = rospy.get_param("~segmentation_server")
-        self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl', 'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard', 'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house', 'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf', 'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
+        self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl',
+                                     'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard',
+                                     'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house',
+                                     'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf',
+                                     'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
         self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
-        self.image_scaling_factor = 0.2
-        self.merging_semantics = False
-
-        # color_palette = get_color_palette("data/seg_rgbs.txt")
-        # self.labels_metadata = {"label_names": self.segmentation_classes, "label_colors": color_palette}
-        # self.file_counter = 0
+        self.bridge = CvBridge()
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
-        self.sub_image = rospy.Subscriber("~image", CompressedImage, self.cb_image, queue_size=1)
+        self.sub_image = rospy.Subscriber("~segmented_image", Image, self.cb_image, queue_size=1)
         
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
@@ -124,13 +122,13 @@ class VoxelMapper:
         self.voxel_hm_debug_pub = rospy.Publisher('~debug/height_map', PointCloud2, queue_size=1)
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
 
+        rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
+
     def cb_odom(self, data):
         self.robot_position = (data.pose.pose.position.x, data.pose.pose.position.y, data.pose.pose.position.z)
 
     def cb_lidar(self, data):
         if self.robot_position is None:
-            return
-        if self.merging_semantics:
             return
 
         robot_pos = self.robot_position
@@ -151,8 +149,8 @@ class VoxelMapper:
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_image(self, data):
-        data_array = np.frombuffer(data.data, dtype=np.uint8)
-        self.camera_image = cv2.imdecode(data_array, cv2.IMREAD_COLOR)
+        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        self.segmented_image = np.expand_dims(cv_image.T, axis=-1)
 
         camera_frame = data.header.frame_id
         camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
@@ -167,62 +165,10 @@ class VoxelMapper:
         rotation[3] = camera_to_world_trans.transform.rotation.w
         self.camera_to_world_transform_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
 
-    def segment_image(self, image_array):
-        image = Image.fromarray(image_array, mode="RGB")
-        img_io = io.BytesIO()
-        image.save(img_io, 'PNG')
-        img_io.seek(0)
-
-        image_files = {"image": ('image.png', img_io, 'image/png')}
-        other_data = {'return_all_categories': 'False', "vocab": self.segmentation_classes_str}
-
-        ret_val = requests.post(self.segmentation_server_address, files=image_files, data=other_data)
-        if ret_val.status_code == 200:
-            ret_val = ret_val.json()
-            shape = ret_val["shape"][1:]
-            decoded_bytes = base64.b64decode(ret_val["sem_seg"])
-            seg_im = np.frombuffer(decoded_bytes, dtype=int).reshape(shape)
-
-            output_labels = ret_val['vocabulary']
-            N = len(output_labels)
-            filtered_label_map = np.zeros(N, dtype=int)
-            for idx, label in enumerate(output_labels):
-                filtered_label_map[idx] = self.segmentation_classes.index(label)
-            filtered_label_seg = np.zeros_like(seg_im)
-            filtered_label_seg[seg_im != N] = filtered_label_map[seg_im[seg_im != N]]
-
-            return filtered_label_seg
-        else:
-            rospy.logerr(f"[G-SVOM] Semantic segmentation request failed with code {ret_val.status_code} and message '{ret_val.reason}'")
-            return None
-
     def cb_semantics_timer(self, event):
-        self.merging_semantics = True
-        if self.camera_image is None:
-            rospy.loginfo(f"[G-SVOM] No image available, skipping semantics merging")
-        if self.camera_to_world_transform_matrix is None:
-            rospy.loginfo(f"[G-SVOM] No extrinsic matrix available, skipping semantics merging")
-        if self.intrinsic_matrix is None or self.distortion_parameters is None:
-            rospy.loginfo(f"[G-SVOM] No intrinsic camera parameters available, skipping semantics merging")
-
-        new_height = int(self.image_scaling_factor*self.camera_image.shape[0])
-        new_width = int(self.image_scaling_factor*self.camera_image.shape[1])
-        cv_image = cv2.resize(self.camera_image, (new_width, new_height))
-        scaled_intrinsic_matrix = self.image_scaling_factor * self.intrinsic_matrix
-        scaled_intrinsic_matrix[2, 2] = 1.0
-
-        segmented_image = self.segment_image(cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB))
-        if segmented_image is None:
+        if self.segmented_image is None:
             return
-
-        # vis = Visualizer(cv_image, self.labels_metadata)
-        # output = vis.draw_sem_seg(segmented_image, alpha=0.3).get_image()
-        # cv2.imwrite("segmented_image" + str(self.file_counter) + ".png", output)
-        # rospy.loginfo("boop")
-        # self.file_counter += 1
-
-        self.voxel_mapper.process_semantics(segmented_image, scaled_intrinsic_matrix, self.camera_to_world_transform_matrix, self.distortion_parameters)
-        self.merging_semantics = False
+        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), self.intrinsic_matrix, self.camera_to_world_transform_matrix, self.distortion_parameters)
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
