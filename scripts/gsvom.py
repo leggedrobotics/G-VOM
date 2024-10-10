@@ -239,8 +239,7 @@ class Gsvom:
         distortion_params = cuda.to_device(distortion_params)
 
         x_indices, y_indices = np.indices((image_width, image_height))
-        sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
-        sampled_rays = sampled_rays[::2]
+        sampled_rays = np.stack((x_indices.ravel()[::3], y_indices.ravel()[::3]), axis=-1)
         sampled_pixel_labels = segmented_image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
         sampled_pixel_labels = torch.from_numpy(sampled_pixel_labels[~is_unknown_label]).to(self.torch_device)
@@ -360,12 +359,12 @@ class Gsvom:
 
         num_labels_to_assign = outputs.shape[0]
         outputs = cuda.to_device(outputs)
-        sampled_rays_gpu = cuda.to_device(sampled_rays)
+        sampled_rays = cuda.to_device(sampled_rays)
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
         blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
         self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu,
-                                                                                   projection_matrix, distortion_params, sampled_rays_gpu,
+                                                                                   projection_matrix, distortion_params, sampled_rays,
                                                                                    num_labels_to_assign, self.xy_resolution,
                                                                                    self.z_resolution, self.combined_xy_size,
                                                                                    self.combined_z_size, self.combined_origin,
@@ -1726,15 +1725,15 @@ class Gsvom:
         origin_offset = context_size // 2
 
         x_index = center_x - origin_offset + row
-        if x_index < 0 or x_index > xy_size:
+        if x_index < 0 or x_index >= xy_size:
             return
         y_index = center_y - origin_offset + col
-        if y_index < 0 or y_index > xy_size:
+        if y_index < 0 or y_index >= xy_size:
             return
 
         for z in range(context_size):
             z_index = center_z - origin_offset + z
-            if z_index < 0 or z_index > z_size:
+            if z_index < 0 or z_index >= z_size:
                 continue
 
             position_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
