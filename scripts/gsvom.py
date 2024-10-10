@@ -178,13 +178,9 @@ class Gsvom:
         tmp_total_count = cuda.device_array([self.voxel_count], dtype=np.int32)
         self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.voxel_count)
 
-        point_to_voxel_map = cuda.device_array([point_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](point_to_voxel_map, -1, point_count)
-
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
-                                                                      tmp_total_count, point_to_voxel_map, point_count,
-                                                                      ego_position, origin)
+                                                                      tmp_total_count, point_count, ego_position, origin)
 
         ###### Populate the lookup table with the correct indexes ######
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
@@ -238,7 +234,7 @@ class Gsvom:
         projection_matrix = cuda.to_device(projection_matrix)
         distortion_params = cuda.to_device(distortion_params)
 
-        x_indices, y_indices = np.indices((image_width, image_height))
+        x_indices, y_indices = np.indices((image_width, image_height), dtype=np.int16)
         sampled_rays = np.stack((x_indices.ravel()[::3], y_indices.ravel()[::3]), axis=-1)
         sampled_pixel_labels = segmented_image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
@@ -264,13 +260,11 @@ class Gsvom:
         raytracing_start_event.record()
 
         sampled_rays = cuda.to_device(sampled_rays)
-        density_vectors = cuda.device_array([nonzero_pixel_count, self.label_assignment_vector_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0.0, nonzero_pixel_count,
-                                                                               self.label_assignment_vector_length)
+        density_vectors = torch.zeros((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.float16, device=self.torch_device)
         max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
         num_occupied_voxels = cuda.to_device(np.zeros([1], dtype=np.int32))
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
-        occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int32, device=self.torch_device)
+        occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
 
         self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
                                                                                               sampled_rays, nonzero_pixel_count, self.xy_resolution,
@@ -315,7 +309,7 @@ class Gsvom:
         other_inputs_end_event = cuda.event()
         other_inputs_start_event.record()
 
-        label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze()
+        label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze().half()
 
         ###### Get the ray directions ######
         world_to_cam_rot = camera_to_world[:3, :3].T
@@ -1313,8 +1307,7 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_to_voxel,
-                      point_count, ego_position, origin):
+    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_count, ego_position, origin):
         i = cuda.grid(1)
         if i < point_count:
             
@@ -1340,12 +1333,10 @@ class Gsvom:
 
             if not oob:
                 # Get the index of the hit
-                index = x_index + y_index*xy_size + z_index*xy_size*xy_size
+                index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
                 # Update the hit count for the index
                 cuda.atomic.add(hit_count, index, 1)
                 cuda.atomic.add(total_count, index, 1)
-                # Assign index to the point to voxel map
-                point_to_voxel[i] = index
             
             # Trace the ray
             pt = numba.cuda.local.array(3, numba.float32)
@@ -1853,8 +1844,8 @@ class Gsvom:
 
         cam_to_ray_matrixes = torch.matmul(x_rot_matrixes, y_rot_matrixes)
         world_to_ray_matrixes = torch.matmul(cam_to_ray_matrixes, world_to_cam_rot)
-        flattened_matrixes = world_to_ray_matrixes.reshape(N, 9)
-        return flattened_matrixes
+        world_to_ray_matrixes = world_to_ray_matrixes.reshape(N, 9)
+        return world_to_ray_matrixes
 
     @staticmethod
     @cuda.jit
