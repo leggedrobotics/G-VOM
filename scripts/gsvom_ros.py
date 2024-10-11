@@ -22,7 +22,6 @@ class VoxelMapper:
         self.intrinsic_matrix = np.array([[1.0, 0.0, 10.0],
                                           [0.0, 1.0, 10.0],
                                           [0.0, 0.0, 1.0]])
-        self.distortion_parameters = [0.0, 0.0, 0.0, 0.0]
         self.camera_to_world_transform_matrix = None
         self.segmented_image = None
 
@@ -171,7 +170,7 @@ class VoxelMapper:
         self.processing_semantics = True
         if self.segmented_image is None:
             return
-        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), self.intrinsic_matrix, self.camera_to_world_transform_matrix, self.distortion_parameters)
+        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), self.intrinsic_matrix, self.camera_to_world_transform_matrix)
         self.segmented_image = None
         self.processing_semantics = False
 

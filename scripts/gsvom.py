@@ -218,7 +218,7 @@ class Gsvom:
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
 
-    def process_semantics(self, segmented_image, projection_matrix, camera_to_world, distortion_params):
+    def process_semantics(self, segmented_image, projection_matrix, camera_to_world):
         """ Assign semantic labels from image to the voxel map"""
         if self.combined_origin is None:
             print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
@@ -232,7 +232,6 @@ class Gsvom:
         image_height = segmented_image.shape[1]
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
-        distortion_params = cuda.to_device(distortion_params)
 
         x_indices, y_indices = np.indices((image_width, image_height), dtype=np.int16)
         sampled_rays = np.stack((x_indices.ravel()[::3], y_indices.ravel()[::3]), axis=-1)
@@ -265,14 +264,13 @@ class Gsvom:
         num_occupied_voxels = torch.zeros(1, dtype=torch.int32, device=self.torch_device)
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
         occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
-        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
-                                                                                              sampled_rays, nonzero_pixel_count, self.xy_resolution,
-                                                                                              self.z_resolution, self.combined_xy_size, self.combined_z_size,
-                                                                                              self.combined_origin, self.combined_index_map,
-                                                                                              self.combined_hit_count, self.combined_total_count,
-                                                                                              self.label_assignment_vector_length, max_num_occupied_voxels,
-                                                                                              density_vectors, gc_indexes, occupied_voxel_coords,
-                                                                                              num_occupied_voxels)
+        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, sampled_rays,
+                                                                                              nonzero_pixel_count, self.xy_resolution, self.z_resolution,
+                                                                                              self.combined_xy_size, self.combined_z_size, self.combined_origin,
+                                                                                              self.combined_index_map, self.combined_hit_count,
+                                                                                              self.combined_total_count, self.label_assignment_vector_length,
+                                                                                              max_num_occupied_voxels, density_vectors, gc_indexes,
+                                                                                              occupied_voxel_coords, num_occupied_voxels)
         num_occupied_voxels = num_occupied_voxels.item()
         if num_occupied_voxels > 0:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
@@ -358,14 +356,11 @@ class Gsvom:
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
         blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
-        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu,
-                                                                                   projection_matrix, distortion_params, sampled_rays,
-                                                                                   num_labels_to_assign, self.xy_resolution,
-                                                                                   self.z_resolution, self.combined_xy_size,
-                                                                                   self.combined_z_size, self.combined_origin,
-                                                                                   self.combined_index_map,
-                                                                                   self.label_assignment_vector_length, outputs,
-                                                                                   self.label_length, self.combined_labels)
+        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu, projection_matrix, sampled_rays,
+                                                                                   num_labels_to_assign, self.xy_resolution, self.z_resolution, self.combined_xy_size,
+                                                                                   self.combined_z_size, self.combined_origin, self.combined_index_map,
+                                                                                   self.label_assignment_vector_length, outputs, self.label_length,
+                                                                                   self.combined_labels)
 
         placement_end_event.record()
         placement_end_event.synchronize()
@@ -1619,9 +1614,8 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
-                                       xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
-                                       total_count_buffer, density_vector_len, max_expected_occupied_voxels, out_density_vectors,
+    def __extract_densities_along_rays(camera_to_world, projection_matrix, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size, map_origin,
+                                       lookup_table, hit_count_buffer, total_count_buffer, density_vector_len, max_expected_occupied_voxels, out_density_vectors,
                                        out_geometric_context_index, out_occupied_voxel_coords, out_occupied_voxel_count):
         sample_index, voxel_num = cuda.grid(2)
         if sample_index >= num_samples or voxel_num >= density_vector_len:
@@ -1735,9 +1729,8 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
-                                  xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, association_vector_len,
-                                  assignment_vectors, label_length, out_label_buffer):
+    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size,
+                                  map_origin, lookup_table, association_vector_len, assignment_vectors, label_length, out_label_buffer):
         sample_index = cuda.grid(1)
         if sample_index >= num_samples:
             return
