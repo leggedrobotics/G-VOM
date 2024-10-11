@@ -267,6 +267,7 @@ class Gsvom:
         num_occupied_voxels = torch.zeros(1, dtype=torch.int32, device=self.torch_device)
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
         occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
+
         self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, sampled_rays,
                                                                                               nonzero_pixel_count, self.xy_resolution, self.z_resolution,
                                                                                               self.combined_xy_size, self.combined_z_size, self.combined_origin,
@@ -290,12 +291,10 @@ class Gsvom:
                                              dtype=torch.float16, device=self.torch_device)
 
         # Remove samples that didn't hit any occupied voxels
-        density_vectors = torch.tensor(density_vectors, device=self.torch_device)
-        sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
-
         is_ray_unoccupied = torch.all(density_vectors == 0, axis=1)
         density_vectors = density_vectors[~is_ray_unoccupied, :]
         gc_indexes = gc_indexes[~is_ray_unoccupied, :]
+        sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
         sampled_rays = sampled_rays[~is_ray_unoccupied, :]
         sampled_pixel_labels = sampled_pixel_labels[~is_ray_unoccupied]
 
