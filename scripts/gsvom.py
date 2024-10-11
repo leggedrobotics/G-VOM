@@ -275,7 +275,7 @@ class Gsvom:
                                                                                               max_num_occupied_voxels, density_vectors, gc_indexes,
                                                                                               occupied_voxel_coords, num_occupied_voxels)
         num_occupied_voxels = num_occupied_voxels.item()
-        if num_occupied_voxels > 0:
+        if num_occupied_voxels > 0 and not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                                             dtype=torch.float16, device=self.torch_device)
             threads_per_block_3d = (128, 2, 2)
@@ -285,7 +285,7 @@ class Gsvom:
             self.get_geometric_contexts[blocks_per_grid_3d, threads_per_block_3d](occupied_voxel_coords, num_occupied_voxels, self.geometric_context_size,
                                                                                   self.combined_index_map, self.combined_hit_count, self.combined_total_count,
                                                                                   self.combined_xy_size, self.combined_z_size, geometric_contexts)
-        else:
+        elif not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                              dtype=torch.float16, device=self.torch_device)
 
