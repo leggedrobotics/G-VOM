@@ -224,9 +224,9 @@ class Gsvom:
             print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
-        prep_start_event = cuda.event()
-        prep_end_event = cuda.event()
-        prep_start_event.record()
+        semantic_merging_start_event = cuda.event()
+        semantics_merging_end_event = cuda.event()
+        semantic_merging_start_event.record()
 
         image_width = segmented_image.shape[0]
         image_height = segmented_image.shape[1]
@@ -251,16 +251,7 @@ class Gsvom:
         blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
 
-        prep_end_event.record()
-        prep_end_event.synchronize()
-        prep_time = cuda.event_elapsed_time(prep_start_event, prep_end_event)
-        print(f"Preparation time: {prep_time} ms")
-
         ###### Get vectors indicating the environment density along a ray projected from each pixel ######
-        raytracing_start_event = cuda.event()
-        raytracing_end_event = cuda.event()
-        raytracing_start_event.record()
-
         sampled_rays = cuda.to_device(sampled_rays)
         density_vectors = torch.zeros((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.float16, device=self.torch_device)
         max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
@@ -298,16 +289,7 @@ class Gsvom:
         sampled_rays = sampled_rays[~is_ray_unoccupied, :]
         sampled_pixel_labels = sampled_pixel_labels[~is_ray_unoccupied]
 
-        raytracing_end_event.record()
-        raytracing_end_event.synchronize()
-        raytracing_time = cuda.event_elapsed_time(raytracing_start_event, raytracing_end_event)
-        print(f"Raytracing time: {raytracing_time} ms")
-
         ###### Encode semantic labels in one-hot-fashion ######
-        other_inputs_start_event = cuda.event()
-        other_inputs_end_event = cuda.event()
-        other_inputs_start_event.record()
-
         label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze().half()
 
         ###### Get the ray directions ######
@@ -321,16 +303,7 @@ class Gsvom:
         projection_matrix = torch.tensor(projection_matrix, device=self.torch_device)
         directions = self.get_pixel_rotations(projection_matrix, sampled_rays, world_to_cam_rot)
 
-        other_inputs_end_event.record()
-        other_inputs_end_event.synchronize()
-        other_inputs_time = cuda.event_elapsed_time(other_inputs_start_event, other_inputs_end_event)
-        print(f"Other inputs time: {other_inputs_time} ms")
-
         ###### Figure out to which voxels to assign the label ######
-        inference_start_event = cuda.event()
-        inference_end_event = cuda.event()
-        inference_start_event.record()
-
         if not self.feature_extractor is None:
             geom_features = self.feature_extractor(geometric_contexts)
             outputs = self.label_association_model(label_vectors, geom_features, directions, gc_indexes)
@@ -340,16 +313,7 @@ class Gsvom:
         outputs = outputs > self.association_threshold
         outputs = outputs.cpu().numpy()
 
-        inference_end_event.record()
-        inference_end_event.synchronize()
-        inference_time = cuda.event_elapsed_time(inference_start_event, inference_end_event)
-        print(f"Inference time: {inference_time} ms")
-
         ###### Do the label assignment based on the model output ######
-        placement_start_event = cuda.event()
-        placement_end_event = cuda.event()
-        placement_start_event.record()
-
         num_labels_to_assign = outputs.shape[0]
         if num_labels_to_assign == 0:
             return
@@ -364,10 +328,10 @@ class Gsvom:
                                                                                    self.label_assignment_vector_length, outputs, self.label_length,
                                                                                    self.combined_labels)
 
-        placement_end_event.record()
-        placement_end_event.synchronize()
-        placement_time = cuda.event_elapsed_time(placement_start_event, placement_end_event)
-        print(f"Placement time: {placement_time} ms")
+        semantics_merging_end_event.record()
+        semantics_merging_end_event.synchronize()
+        semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantics_merging_end_event)
+        print(f"Semantics merging time: {semantics_merging_time} ms")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
