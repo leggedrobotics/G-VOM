@@ -42,27 +42,3 @@ class ModelV7(nn.Module):
         x = torch.sigmoid(self.layer2(x))
         output = self.layer3(x)
         return output
-
-    # Prints out a warning if the gradient is too big or too small
-    def check_gradient(self):
-        abs_layer1_weight_grad = torch.abs(self.layer1.weight.grad)
-        layer1_weight_max = torch.max(abs_layer1_weight_grad)
-        abs_layer1_bias_grad = torch.abs(self.layer1.bias.grad)
-        layer1_bias_max = torch.max(abs_layer1_bias_grad)
-        abs_layer2_weight_grad = torch.abs(self.layer2.weight.grad)
-        layer2_weight_max = torch.max(abs_layer2_weight_grad)
-        abs_layer2_bias_grad = torch.abs(self.layer2.bias.grad)
-        layer2_bias_max = torch.max(abs_layer2_bias_grad)
-        abs_layer3_weight_grad = torch.abs(self.layer3.weight.grad)
-        layer3_weight_max = torch.max(abs_layer3_weight_grad)
-        abs_layer3_bias_grad = torch.abs(self.layer3.bias.grad)
-        layer3_bias_max = torch.max(abs_layer3_bias_grad)
-
-        max_grad_layer1 = min(layer1_weight_max, layer1_bias_max)
-        max_grad_layer2 = min(layer2_weight_max, layer2_bias_max)
-        max_grad_layer3 = min(layer3_weight_max, layer3_bias_max)
-        max_grad = min(max_grad_layer1, max_grad_layer2, max_grad_layer3)
-        if max_grad < 1e-7:
-            print(f"[WARNING] The gradient of model V7 is very small! Maximum is: {max_grad}")
-        if max_grad > 1e6:
-            print(f"[WARNING] The gradient of model V7 is too large! Maximum is: {max_grad}")
