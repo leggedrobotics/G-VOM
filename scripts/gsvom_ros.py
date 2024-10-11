@@ -95,7 +95,6 @@ class VoxelMapper:
                                      'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
         self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
         self.bridge = CvBridge()
-        self.processing_semantics = False
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
@@ -123,8 +122,6 @@ class VoxelMapper:
         self.robot_position = (data.pose.pose.position.x, data.pose.pose.position.y, data.pose.pose.position.z)
 
     def cb_lidar(self, data):
-        if self.processing_semantics:
-            return
         if self.robot_position is None:
             return
 
@@ -146,8 +143,6 @@ class VoxelMapper:
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_image(self, data):
-        if self.processing_semantics:
-            return
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.segmented_image = np.expand_dims(cv_image.T, axis=-1)
 
@@ -165,18 +160,12 @@ class VoxelMapper:
         self.camera_to_world_transform_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
 
     def cb_semantics_timer(self, event):
-        if self.processing_semantics:
-            return
-        self.processing_semantics = True
         if self.segmented_image is None:
             return
         self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), self.intrinsic_matrix, self.camera_to_world_transform_matrix)
         self.segmented_image = None
-        self.processing_semantics = False
 
     def cb_map_merge_timer(self, event):
-        if self.processing_semantics:
-            return
         map_data = self.voxel_mapper.combine_maps()
         if map_data is None:
             rospy.loginfo("map_data is None. returning.")
