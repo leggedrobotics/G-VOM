@@ -233,8 +233,11 @@ class Gsvom:
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
 
-        x_indices, y_indices = np.indices((image_width, image_height), dtype=np.int16)
-        sampled_rays = np.stack((x_indices.ravel()[::3], y_indices.ravel()[::3]), axis=-1)
+        x_indices = np.arange(0, image_width, 3)
+        y_indices = np.arange(0, image_height, 3)
+        xx, yy = np.meshgrid(x_indices, y_indices)
+        sampled_rays = np.stack((xx.flatten(), yy.flatten()), axis=1)
+
         sampled_pixel_labels = segmented_image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
         sampled_pixel_labels = torch.from_numpy(sampled_pixel_labels[~is_unknown_label]).to(self.torch_device)
