@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 import numpy as np
-import cv2
 from PIL import Image
-import io
-import requests
-import base64
 
 import rospy
 from nav_msgs.msg import Odometry, OccupancyGrid
@@ -23,7 +19,7 @@ class VoxelMapper:
         self.robot_position = None
 
         # TODO: Update this to Nones to be safe from doing unexpected things
-        self.intrinsic_matrix = np.array([[0.0, 1.0, 10.0],
+        self.intrinsic_matrix = np.array([[1.0, 0.0, 10.0],
                                           [0.0, 1.0, 10.0],
                                           [0.0, 0.0, 1.0]])
         self.distortion_parameters = [0.0, 0.0, 0.0, 0.0]
@@ -93,7 +89,6 @@ class VoxelMapper:
             place_label_threshold,
             use_dynamic_combined_map)
 
-        self.segmentation_server_address = rospy.get_param("~segmentation_server")
         self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl',
                                      'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard',
                                      'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house',
