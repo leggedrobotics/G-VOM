@@ -18,6 +18,8 @@ class ModelV1(nn.Module):
         self.layer2 = nn.Linear(input_length, self.geometric_context_length)
 
     def forward(self, semantic_label, geometry, ray_direction):
+        if len(semantic_label.shape) == 1:
+            semantic_label = semantic_label[None, :]
         input_tensor = torch.cat((semantic_label, geometry), dim=1)
         x = self.layer1(input_tensor)
         x = torch.sigmoid(x)
