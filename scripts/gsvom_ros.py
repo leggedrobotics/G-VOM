@@ -170,6 +170,7 @@ class VoxelMapper:
         intrinsic_matrix = np.array(self.intrinsic_camera_params).reshape((3, 3))
         self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), intrinsic_matrix, self.camera_to_world_transform_matrix)
         self.segmented_image = None
+        rospy.loginfo("[G-SVOM] Merged Semantics")
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
