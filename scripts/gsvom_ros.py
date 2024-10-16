@@ -4,7 +4,7 @@ from PIL import Image
 
 import rospy
 from nav_msgs.msg import Odometry, OccupancyGrid
-from sensor_msgs.msg import PointCloud2, Image
+from sensor_msgs.msg import PointCloud2, Image, CameraInfo
 import tf2_ros
 import tf
 import ros_numpy
@@ -19,9 +19,7 @@ class VoxelMapper:
         self.robot_position = None
 
         # TODO: Update this to Nones to be safe from doing unexpected things
-        self.intrinsic_matrix = np.array([[1.0, 0.0, 10.0],
-                                          [0.0, 1.0, 10.0],
-                                          [0.0, 0.0, 1.0]])
+        self.intrinsic_camera_params = None
         self.camera_to_world_transform_matrix = None
         self.segmented_image = None
 
@@ -99,6 +97,7 @@ class VoxelMapper:
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
         self.sub_image = rospy.Subscriber("~segmented_image", Image, self.cb_image, queue_size=1)
+        self.sub_camera_info = rospy.Subscriber("~camera_info", CameraInfo, self.cb_camera_info, queue_size=1)
         
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
@@ -109,7 +108,7 @@ class VoxelMapper:
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
         self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
-        self.semantics_merge_timer = rospy.Timer(rospy.Duration(secs=10), self.cb_semantics_timer)
+        self.semantics_merge_timer = rospy.Timer(rospy.Duration(secs=1), self.cb_semantics_timer)
         
         self.lidar_debug_pub = rospy.Publisher('~debug/lidar', PointCloud2, queue_size=1)
         self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
@@ -142,6 +141,9 @@ class VoxelMapper:
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
+    def cb_camera_info(self, data):
+        self.intrinsic_camera_params = data.K
+
     def cb_image(self, data):
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.segmented_image = np.expand_dims(cv_image.T, axis=-1)
@@ -160,9 +162,10 @@ class VoxelMapper:
         self.camera_to_world_transform_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
 
     def cb_semantics_timer(self, event):
-        if self.segmented_image is None:
+        if self.segmented_image is None or self.intrinsic_camera_params is None:
             return
-        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), self.intrinsic_matrix, self.camera_to_world_transform_matrix)
+        intrinsic_matrix = np.array(self.intrinsic_camera_params).reshape((3, 3))
+        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), intrinsic_matrix, self.camera_to_world_transform_matrix)
         self.segmented_image = None
 
     def cb_map_merge_timer(self, event):
