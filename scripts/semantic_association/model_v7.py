@@ -28,6 +28,8 @@ class ModelV7(nn.Module):
         self.positional_embedding = torch.repeat_interleave(raw_positional_embedding[:, 0], repeats=geom_feature_length)
 
     def forward(self, semantic_label, geometric_features, ray_direction, context_map):
+        if len(semantic_label.shape) == 1:
+            semantic_label = semantic_label[None, :]
         batch_size = semantic_label.shape[0]
         device = next(self.parameters()).device
 

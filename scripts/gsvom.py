@@ -111,6 +111,7 @@ class Gsvom:
         self.combined_cell_count_cpu = None
         self.combined_labels = None
         self.combined_timestamps = None
+        self.combined_semaphore = threading.Semaphore()
 
         self.last_combined_index_map = None
         self.last_combined_hit_count = None
@@ -220,7 +221,10 @@ class Gsvom:
 
     def process_semantics(self, segmented_image, projection_matrix, camera_to_world):
         """ Assign semantic labels from image to the voxel map"""
-        if self.combined_origin is None:
+        self.combined_semaphore.acquire()
+        combined_map_presence_check = self.combined_origin is None
+        self.combined_semaphore.release()
+        if combined_map_presence_check:
             print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
@@ -233,7 +237,7 @@ class Gsvom:
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
 
-        skip_pixels = 3
+        skip_pixels = 4
         x_indices = np.arange(0, image_width, skip_pixels)
         y_indices = np.arange(0, image_height, skip_pixels)
         xx, yy = np.meshgrid(x_indices, y_indices)
@@ -260,6 +264,7 @@ class Gsvom:
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
         occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
 
+        self.combined_semaphore.acquire()
         self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, sampled_rays,
                                                                                               nonzero_pixel_count, self.xy_resolution, self.z_resolution,
                                                                                               self.combined_xy_size, self.combined_z_size, self.combined_origin,
@@ -267,6 +272,7 @@ class Gsvom:
                                                                                               self.combined_total_count, self.label_assignment_vector_length,
                                                                                               max_num_occupied_voxels, density_vectors, gc_indexes,
                                                                                               occupied_voxel_coords, num_occupied_voxels)
+        self.combined_semaphore.release()
         num_occupied_voxels = num_occupied_voxels.item()
         if num_occupied_voxels > 0 and not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
@@ -275,9 +281,11 @@ class Gsvom:
             blocks_per_grid_a = int(np.ceil(num_occupied_voxels / threads_per_block_3d[0]))
             blocks_per_grid_b = int(np.ceil(self.geometric_context_size / threads_per_block_3d[1]))
             blocks_per_grid_3d = (blocks_per_grid_a, blocks_per_grid_b, blocks_per_grid_b)
+            self.combined_semaphore.acquire()
             self.get_geometric_contexts[blocks_per_grid_3d, threads_per_block_3d](occupied_voxel_coords, num_occupied_voxels, self.geometric_context_size,
                                                                                   self.combined_index_map, self.combined_hit_count, self.combined_total_count,
                                                                                   self.combined_xy_size, self.combined_z_size, geometric_contexts)
+            self.combined_semaphore.release()
         elif not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                              dtype=torch.float16, device=self.torch_device)
@@ -323,22 +331,25 @@ class Gsvom:
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
         blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
+        self.combined_semaphore.acquire()
         self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu, projection_matrix, sampled_rays,
                                                                                    num_labels_to_assign, self.xy_resolution, self.z_resolution, self.combined_xy_size,
                                                                                    self.combined_z_size, self.combined_origin, self.combined_index_map,
                                                                                    self.label_assignment_vector_length, outputs, self.label_length,
                                                                                    self.combined_labels)
+        self.combined_semaphore.release()
 
         semantics_merging_end_event.record()
         semantics_merging_end_event.synchronize()
         semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantics_merging_end_event)
-        print(f"Semantics merging time: {semantics_merging_time} ms")
+        # print(f"Semantics merging time: {semantics_merging_time} ms")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
         if self.origin_buffer[self.last_buffer_index] is None:
             print("[WARNING] The map buffer is empty, nothing will happen!")
             return
+        self.combined_semaphore.acquire()
 
         ###### Store the current combined map as the last combined map ######
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
@@ -548,6 +559,7 @@ class Gsvom:
         ###### Assemble return values #####
         map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
+        self.combined_semaphore.release()
         return map_return_tuple
 
     def get_map_as_occupancy_grid(self):
