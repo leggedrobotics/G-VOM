@@ -108,7 +108,7 @@ class VoxelMapper:
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
         self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
-        self.semantics_merge_timer = rospy.Timer(rospy.Duration(secs=1), self.cb_semantics_timer)
+        self.semantics_merge_timer = rospy.Timer(rospy.Duration(0.5), self.cb_semantics_timer)
         
         self.lidar_debug_pub = rospy.Publisher('~debug/lidar', PointCloud2, queue_size=1)
         self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
@@ -149,7 +149,10 @@ class VoxelMapper:
         self.segmented_image = np.expand_dims(cv_image.T, axis=-1)
 
         camera_frame = data.header.frame_id
-        camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
+        try:
+            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
+        except tf.ExtrapolationException:
+            return
         translation = np.zeros([3])
         translation[0] = camera_to_world_trans.transform.translation.x
         translation[1] = camera_to_world_trans.transform.translation.y
