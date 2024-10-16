@@ -1,4 +1,5 @@
 import numba
+import rospy
 from numba import cuda, config
 import numpy as np
 import math
@@ -34,7 +35,7 @@ class Gsvom:
     association_model:              A torch NN used for image feature to voxel map association
     geometric_feature_extractor:    A torch NN used to extract geometric features from geometric contexts
     place_label_threshold:          If the label association model output is higher than this, the label is associated with the voxel in question
-    use_dynamic_global_map:         If the map pointclouds get integrated to should move with the robot, or stay static and change size
+    use_dynamic_global_map:         If true the map pointclouds get integrated to will move with the robot, otherwise it will stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
@@ -110,6 +111,7 @@ class Gsvom:
         self.combined_cell_count_cpu = None
         self.combined_labels = None
         self.combined_timestamps = None
+        self.combined_semaphore = threading.Semaphore()
 
         self.last_combined_index_map = None
         self.last_combined_hit_count = None
@@ -177,13 +179,9 @@ class Gsvom:
         tmp_total_count = cuda.device_array([self.voxel_count], dtype=np.int32)
         self.__init_1D_array[self.blocks, self.threads_per_block](tmp_total_count, 0, self.voxel_count)
 
-        point_to_voxel_map = cuda.device_array([point_count], dtype=np.int32)
-        self.__init_1D_array[self.blocks, self.threads_per_block](point_to_voxel_map, -1, point_count)
-
         self.__point_2_map[blocks_pointcloud, self.threads_per_block](self.xy_resolution, self.z_resolution, self.xy_size,
                                                                       self.z_size, self.min_distance, pointcloud, tmp_hit_count,
-                                                                      tmp_total_count, point_to_voxel_map, point_count,
-                                                                      ego_position, origin)
+                                                                      tmp_total_count, point_count, ego_position, origin)
 
         ###### Populate the lookup table with the correct indexes ######
         self.__assign_indices[blocks_map, self.threads_per_block](tmp_hit_count, tmp_total_count, index_map, cell_count,
@@ -221,98 +219,87 @@ class Gsvom:
         if self.buffer_index >= self.buffer_size:
             self.buffer_index = 0
 
-    def process_semantics(self, image, projection_matrix, camera_to_world, distortion_params):
+    def process_semantics(self, segmented_image, projection_matrix, camera_to_world):
         """ Assign semantic labels from image to the voxel map"""
-        if self.combined_origin is None:
-            print("[ERROR] There is no combined map to merge the semantics into! Nothing will happen.")
+        self.combined_semaphore.acquire()
+        combined_map_presence_check = self.combined_origin is None
+        self.combined_semaphore.release()
+        if combined_map_presence_check:
+            print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
-        prep_start_event = cuda.event()
-        prep_end_event = cuda.event()
-        prep_start_event.record()
+        semantic_merging_start_event = cuda.event()
+        semantics_merging_end_event = cuda.event()
+        semantic_merging_start_event.record()
 
-        image_width = image.shape[0]
-        image_height = image.shape[1]
+        image_width = segmented_image.shape[0]
+        image_height = segmented_image.shape[1]
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
-        distortion_params = cuda.to_device(distortion_params)
 
-        x_indices, y_indices = np.indices((image_width, image_height))
-        sampled_rays = np.stack((x_indices.ravel(), y_indices.ravel()), axis=-1)
-        sampled_rays = sampled_rays[::2]
-        sampled_pixel_labels = image[sampled_rays[:, 0], sampled_rays[:, 1]]
+        skip_pixels = 4
+        x_indices = np.arange(0, image_width, skip_pixels)
+        y_indices = np.arange(0, image_height, skip_pixels)
+        xx, yy = np.meshgrid(x_indices, y_indices)
+        sampled_rays = np.stack((xx.flatten(), yy.flatten()), axis=1)
+
+        sampled_pixel_labels = segmented_image[sampled_rays[:, 0], sampled_rays[:, 1]]
         is_unknown_label = sampled_pixel_labels.squeeze() == 0
         sampled_pixel_labels = torch.from_numpy(sampled_pixel_labels[~is_unknown_label]).to(self.torch_device)
         sampled_rays = sampled_rays[~is_unknown_label, :]
 
         nonzero_pixel_count = sampled_rays.shape[0]
+        if nonzero_pixel_count == 0:
+            print("[WARN] There are no pixels with known labels in the image. Nothing will happen")
+            return
         blockspergrid_ray_num_2d = math.ceil(nonzero_pixel_count / self.threads_per_block_2D[0])
         blockspergrid_ray_length_2d = math.ceil(self.label_assignment_vector_length / self.threads_per_block_2D[1])
         blockspergrid_rays_2d = (blockspergrid_ray_num_2d, blockspergrid_ray_length_2d)
 
-        prep_end_event.record()
-        prep_end_event.synchronize()
-        prep_time = cuda.event_elapsed_time(prep_start_event, prep_end_event)
-        print(f"Preparation time: {prep_time} ms")
-
         ###### Get vectors indicating the environment density along a ray projected from each pixel ######
-        raytracing_start_event = cuda.event()
-        raytracing_end_event = cuda.event()
-        raytracing_start_event.record()
-
         sampled_rays = cuda.to_device(sampled_rays)
-        density_vectors = cuda.device_array([nonzero_pixel_count, self.label_assignment_vector_length], dtype=np.float16)
-        self.__init_2D_array[blockspergrid_rays_2d, self.threads_per_block_2D](density_vectors, 0.0, nonzero_pixel_count,
-                                                                               self.label_assignment_vector_length)
+        density_vectors = torch.zeros((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.float16, device=self.torch_device)
         max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
-        num_occupied_voxels = cuda.to_device(np.zeros([1], dtype=np.int32))
+        num_occupied_voxels = torch.zeros(1, dtype=torch.int32, device=self.torch_device)
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
-        occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int32, device=self.torch_device)
+        occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
 
-        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, distortion_params,
-                                                                                              sampled_rays, nonzero_pixel_count, self.xy_resolution,
-                                                                                              self.z_resolution, self.combined_xy_size, self.combined_z_size,
-                                                                                              self.combined_origin, self.combined_index_map,
-                                                                                              self.combined_hit_count, self.combined_total_count,
-                                                                                              self.label_assignment_vector_length, max_num_occupied_voxels,
-                                                                                              density_vectors, gc_indexes, occupied_voxel_coords,
-                                                                                              num_occupied_voxels)
-        num_occupied_voxels = num_occupied_voxels.copy_to_host()[0]
-        if num_occupied_voxels > 0:
+        self.combined_semaphore.acquire()
+        self.__extract_densities_along_rays[blockspergrid_rays_2d, self.threads_per_block_2D](camera_to_world_gpu, projection_matrix, sampled_rays,
+                                                                                              nonzero_pixel_count, self.xy_resolution, self.z_resolution,
+                                                                                              self.combined_xy_size, self.combined_z_size, self.combined_origin,
+                                                                                              self.combined_index_map, self.combined_hit_count,
+                                                                                              self.combined_total_count, self.label_assignment_vector_length,
+                                                                                              max_num_occupied_voxels, density_vectors, gc_indexes,
+                                                                                              occupied_voxel_coords, num_occupied_voxels)
+        self.combined_semaphore.release()
+        num_occupied_voxels = num_occupied_voxels.item()
+        if num_occupied_voxels > 0 and not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                                             dtype=torch.float16, device=self.torch_device)
             threads_per_block_3d = (128, 2, 2)
             blocks_per_grid_a = int(np.ceil(num_occupied_voxels / threads_per_block_3d[0]))
             blocks_per_grid_b = int(np.ceil(self.geometric_context_size / threads_per_block_3d[1]))
             blocks_per_grid_3d = (blocks_per_grid_a, blocks_per_grid_b, blocks_per_grid_b)
+            self.combined_semaphore.acquire()
             self.get_geometric_contexts[blocks_per_grid_3d, threads_per_block_3d](occupied_voxel_coords, num_occupied_voxels, self.geometric_context_size,
                                                                                   self.combined_index_map, self.combined_hit_count, self.combined_total_count,
                                                                                   self.combined_xy_size, self.combined_z_size, geometric_contexts)
-        else:
+            self.combined_semaphore.release()
+        elif not self.feature_extractor is None:
             geometric_contexts = torch.zeros((num_occupied_voxels, self.geometric_context_size, self.geometric_context_size, self.geometric_context_size),
                                              dtype=torch.float16, device=self.torch_device)
 
         # Remove samples that didn't hit any occupied voxels
-        density_vectors = torch.tensor(density_vectors, device=self.torch_device)
-        sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
-
         is_ray_unoccupied = torch.all(density_vectors == 0, axis=1)
         density_vectors = density_vectors[~is_ray_unoccupied, :]
         gc_indexes = gc_indexes[~is_ray_unoccupied, :]
+        sampled_rays = torch.tensor(sampled_rays, device=self.torch_device)
         sampled_rays = sampled_rays[~is_ray_unoccupied, :]
         sampled_pixel_labels = sampled_pixel_labels[~is_ray_unoccupied]
 
-        raytracing_end_event.record()
-        raytracing_end_event.synchronize()
-        raytracing_time = cuda.event_elapsed_time(raytracing_start_event, raytracing_end_event)
-        print(f"Raytracing time: {raytracing_time} ms")
-
         ###### Encode semantic labels in one-hot-fashion ######
-        other_inputs_start_event = cuda.event()
-        other_inputs_end_event = cuda.event()
-        other_inputs_start_event.record()
-
-        label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze()
+        label_vectors = torch.nn.functional.one_hot(sampled_pixel_labels, self.label_count).squeeze().half()
 
         ###### Get the ray directions ######
         world_to_cam_rot = camera_to_world[:3, :3].T
@@ -325,16 +312,7 @@ class Gsvom:
         projection_matrix = torch.tensor(projection_matrix, device=self.torch_device)
         directions = self.get_pixel_rotations(projection_matrix, sampled_rays, world_to_cam_rot)
 
-        other_inputs_end_event.record()
-        other_inputs_end_event.synchronize()
-        other_inputs_time = cuda.event_elapsed_time(other_inputs_start_event, other_inputs_end_event)
-        print(f"Other inputs time: {other_inputs_time} ms")
-
         ###### Figure out to which voxels to assign the label ######
-        inference_start_event = cuda.event()
-        inference_end_event = cuda.event()
-        inference_start_event.record()
-
         if not self.feature_extractor is None:
             geom_features = self.feature_extractor(geometric_contexts)
             outputs = self.label_association_model(label_vectors, geom_features, directions, gc_indexes)
@@ -344,41 +322,34 @@ class Gsvom:
         outputs = outputs > self.association_threshold
         outputs = outputs.cpu().numpy()
 
-        inference_end_event.record()
-        inference_end_event.synchronize()
-        inference_time = cuda.event_elapsed_time(inference_start_event, inference_end_event)
-        print(f"Inference time: {inference_time} ms")
-
         ###### Do the label assignment based on the model output ######
-        placement_start_event = cuda.event()
-        placement_end_event = cuda.event()
-        placement_start_event.record()
-
         num_labels_to_assign = outputs.shape[0]
+        if num_labels_to_assign == 0:
+            return
         outputs = cuda.to_device(outputs)
-        sampled_rays_gpu = cuda.to_device(sampled_rays)
+        sampled_rays = cuda.to_device(sampled_rays)
         sampled_pixel_labels = cuda.to_device(sampled_pixel_labels)
 
         blockspergrid_rays = math.ceil(num_labels_to_assign / self.threads_per_block)
-        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu,
-                                                                                   projection_matrix, distortion_params, sampled_rays_gpu,
-                                                                                   num_labels_to_assign, self.xy_resolution,
-                                                                                   self.z_resolution, self.combined_xy_size,
-                                                                                   self.combined_z_size, self.combined_origin,
-                                                                                   self.combined_index_map,
-                                                                                   self.label_assignment_vector_length, outputs,
-                                                                                   self.label_length, self.combined_labels)
+        self.combined_semaphore.acquire()
+        self.__place_labels_along_rays[blockspergrid_rays, self.threads_per_block](sampled_pixel_labels, camera_to_world_gpu, projection_matrix, sampled_rays,
+                                                                                   num_labels_to_assign, self.xy_resolution, self.z_resolution, self.combined_xy_size,
+                                                                                   self.combined_z_size, self.combined_origin, self.combined_index_map,
+                                                                                   self.label_assignment_vector_length, outputs, self.label_length,
+                                                                                   self.combined_labels)
+        self.combined_semaphore.release()
 
-        placement_end_event.record()
-        placement_end_event.synchronize()
-        placement_time = cuda.event_elapsed_time(placement_start_event, placement_end_event)
-        print(f"Placement time: {placement_time} ms")
+        semantics_merging_end_event.record()
+        semantics_merging_end_event.synchronize()
+        semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantics_merging_end_event)
+        # print(f"Semantics merging time: {semantics_merging_time} ms")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
         if self.origin_buffer[self.last_buffer_index] is None:
             print("[WARNING] The map buffer is empty, nothing will happen!")
             return
+        self.combined_semaphore.acquire()
 
         ###### Store the current combined map as the last combined map ######
         self.last_combined_cell_count_cpu = self.combined_cell_count_cpu
@@ -588,6 +559,7 @@ class Gsvom:
         ###### Assemble return values #####
         map_return_tuple = (combined_origin_world, positive_obstacle_map.copy_to_host(), negative_obstacle_map.copy_to_host(),
                             self.roughness_map.copy_to_host(), visibility_map.copy_to_host())
+        self.combined_semaphore.release()
         return map_return_tuple
 
     def get_map_as_occupancy_grid(self):
@@ -1310,14 +1282,16 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_to_voxel,
-                      point_count, ego_position, origin):
+    def __point_2_map(xy_resolution, z_resolution, xy_size, z_size, min_distance, points, hit_count, total_count, point_count, ego_position, origin):
         i = cuda.grid(1)
         if i < point_count:
             
             # Check the point is not too close to the robot
-            d2 = points[i, 0]*points[i, 0] + points[i, 1]*points[i, 1] + points[i, 2]*points[i, 2]
-            if(d2 < min_distance*min_distance):
+            dist_x = points[i, 0] - ego_position[0]
+            dist_y = points[i, 1] - ego_position[1]
+            dist_z = points[i, 2] - ego_position[2]
+            d2 = dist_x*dist_x + dist_y*dist_y + dist_z*dist_z
+            if d2 < min_distance*min_distance:
                 return
 
             # Check the point is not out of the bounds of the map
@@ -1334,12 +1308,10 @@ class Gsvom:
 
             if not oob:
                 # Get the index of the hit
-                index = x_index + y_index*xy_size + z_index*xy_size*xy_size
+                index = int(x_index + y_index*xy_size + z_index*xy_size*xy_size)
                 # Update the hit count for the index
                 cuda.atomic.add(hit_count, index, 1)
                 cuda.atomic.add(total_count, index, 1)
-                # Assign index to the point to voxel map
-                point_to_voxel[i] = index
             
             # Trace the ray
             pt = numba.cuda.local.array(3, numba.float32)
@@ -1621,9 +1593,8 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __extract_densities_along_rays(camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
-                                       xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, hit_count_buffer,
-                                       total_count_buffer, density_vector_len, max_expected_occupied_voxels, out_density_vectors,
+    def __extract_densities_along_rays(camera_to_world, projection_matrix, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size, map_origin,
+                                       lookup_table, hit_count_buffer, total_count_buffer, density_vector_len, max_expected_occupied_voxels, out_density_vectors,
                                        out_geometric_context_index, out_occupied_voxel_coords, out_occupied_voxel_count):
         sample_index, voxel_num = cuda.grid(2)
         if sample_index >= num_samples or voxel_num >= density_vector_len:
@@ -1694,7 +1665,6 @@ class Gsvom:
 
         index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
         buffer_index = lookup_table[index]
-
         if buffer_index > -1:
             out_density_vectors[sample_index, voxel_num] = hit_count_buffer[buffer_index]/total_count_buffer[buffer_index]
             gc_index = cuda.atomic.add(out_occupied_voxel_count, 0, 1)
@@ -1720,15 +1690,15 @@ class Gsvom:
         origin_offset = context_size // 2
 
         x_index = center_x - origin_offset + row
-        if x_index < 0 or x_index > xy_size:
+        if x_index < 0 or x_index >= xy_size:
             return
         y_index = center_y - origin_offset + col
-        if y_index < 0 or y_index > xy_size:
+        if y_index < 0 or y_index >= xy_size:
             return
 
         for z in range(context_size):
             z_index = center_z - origin_offset + z
-            if z_index < 0 or z_index > z_size:
+            if z_index < 0 or z_index >= z_size:
                 continue
 
             position_index = int(x_index + y_index * xy_size + z_index * xy_size * xy_size)
@@ -1738,9 +1708,8 @@ class Gsvom:
 
     @staticmethod
     @cuda.jit
-    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, distortion_parameters, sampled_rays, num_samples,
-                                  xy_resolution, z_resolution, xy_size, z_size, map_origin, lookup_table, association_vector_len,
-                                  assignment_vectors, label_length, out_label_buffer):
+    def __place_labels_along_rays(labels, camera_to_world, projection_matrix, sampled_rays, num_samples, xy_resolution, z_resolution, xy_size, z_size,
+                                  map_origin, lookup_table, association_vector_len, assignment_vectors, label_length, out_label_buffer):
         sample_index = cuda.grid(1)
         if sample_index >= num_samples:
             return
@@ -1848,8 +1817,8 @@ class Gsvom:
 
         cam_to_ray_matrixes = torch.matmul(x_rot_matrixes, y_rot_matrixes)
         world_to_ray_matrixes = torch.matmul(cam_to_ray_matrixes, world_to_cam_rot)
-        flattened_matrixes = world_to_ray_matrixes.reshape(N, 9)
-        return flattened_matrixes
+        world_to_ray_matrixes = world_to_ray_matrixes.reshape(N, 9)
+        return world_to_ray_matrixes
 
     @staticmethod
     @cuda.jit
