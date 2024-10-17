@@ -571,6 +571,14 @@ class Gsvom:
 
     def get_map_as_painted_occupancy_pointcloud(self):
         """ Returns a point and a label for each occupied cell in the combined occupancy map"""
+        self.combined_semaphore.acquire()
+        combined_map_presence_check = self.combined_origin is None
+        self.combined_semaphore.release()
+        if combined_map_presence_check:
+            print("[WARN] There is no combined map to visualize! Nothing will happen.")
+            return
+
+        self.combined_semaphore.acquire()
         occupied_cell_count = self.combined_cell_count_cpu
         out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
         out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
@@ -587,6 +595,7 @@ class Gsvom:
                                                                                                  self.z_resolution,
                                                                                                  self.label_length, out_points,
                                                                                                  out_labels)
+        self.combined_semaphore.release()
 
         points = out_points.copy_to_host()
         labels = out_labels.copy_to_host()
