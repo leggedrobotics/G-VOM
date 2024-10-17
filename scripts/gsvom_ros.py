@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import os
 import numpy as np
 from PIL import Image
 
@@ -116,6 +117,7 @@ class VoxelMapper:
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
 
         self.visualization_timestep = 0
+        self.visualization_file_directory = rospy.get_param("~vis_storage_path", "")
         self.rerun_visualizer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
@@ -173,7 +175,7 @@ class VoxelMapper:
         intrinsic_matrix = np.array(self.intrinsic_camera_params).reshape((3, 3))
         self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), intrinsic_matrix, self.camera_to_world_transform_matrix)
         self.segmented_image = None
-        rospy.loginfo("[G-SVOM] Merged Semantics")
+        rospy.loginfo("[G-SVOM] Merged Semantics!")
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
@@ -254,10 +256,10 @@ class VoxelMapper:
         map_center = np.mean(voxel_centers, axis=0)
         voxel_centers -= map_center
 
-        file_name = "/home/hebcak/ros_data/ros_data" + str(self.visualization_timestep) + ".npz"
+        file_name = os.path.join(self.visualization_file_directory, "ros_data" + str(self.visualization_timestep) + ".npz")
         np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
         self.visualization_timestep += 1
-        rospy.loginfo("Published map to rerun")
+        rospy.loginfo("[G-SVOM] Stored painted map!")
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')

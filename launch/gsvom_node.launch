@@ -6,6 +6,7 @@
     	<remap from="~camera_info" to="/gt_box/hdr_front/segmentation/camera_info" />
     	
     	<param name="~odom_frame" value="enu_origin"/>
+    	<param name="~vis_storage_path" value="/home/hebcak/ros_data"/>
     	
         <param name="~association_model_type" value="v7"/>
         <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v7_trained_w_mlp.pt"/>
