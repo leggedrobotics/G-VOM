@@ -115,6 +115,9 @@ class VoxelMapper:
         self.voxel_hm_debug_pub = rospy.Publisher('~debug/height_map', PointCloud2, queue_size=1)
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
 
+        self.visualization_timestep = 0
+        self.rerun_visualizer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
+
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
 
     def cb_odom(self, data):
@@ -241,6 +244,20 @@ class VoxelMapper:
             voxel_inf_hm = np.core.records.fromarrays([voxel_inf_hm[:,0], voxel_inf_hm[:,1], voxel_inf_hm[:,2]], names='x,y,z')
             self.voxel_inf_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_inf_hm, rospy.Time.now(), self.odom_frame))
         rospy.loginfo("[G-SVOM] Published maps!")
+
+    def cb_painted_pointcloud_storage(self, event):
+        vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
+        if vis_data is None:
+            return
+        voxel_centers, voxel_labels = vis_data
+
+        map_center = np.mean(voxel_centers, axis=0)
+        voxel_centers -= map_center
+
+        file_name = "/home/hebcak/ros_data/ros_data" + str(self.visualization_timestep) + ".npz"
+        np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
+        self.visualization_timestep += 1
+        rospy.loginfo("Published map to rerun")
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')
