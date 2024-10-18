@@ -118,7 +118,7 @@ class VoxelMapper:
 
         self.visualization_timestep = 0
         self.visualization_file_directory = rospy.get_param("~vis_storage_path", "")
-        self.rerun_visualizer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
+        # self.visualization_timer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
 
