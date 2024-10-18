@@ -602,20 +602,22 @@ class Gsvom:
         return points, labels
 
     def make_debug_voxel_map(self):
-        if(self.combined_cell_count_cpu is None):
-            print("No data")
+        self.combined_semaphore.acquire()
+        combined_map_presence_check = self.combined_origin is None
+        self.combined_semaphore.release()
+        if combined_map_presence_check:
             return None
-        blockspergrid_xy = math.ceil(
-            self.xy_size / self.threads_per_block_3D[0])
+
+        self.combined_semaphore.acquire()
+        blockspergrid_xy = math.ceil(self.xy_size / self.threads_per_block_3D[0])
         blockspergrid_z = math.ceil(self.z_size / self.threads_per_block_3D[2])
         blockspergrid = (blockspergrid_xy, blockspergrid_xy, blockspergrid_z)
-
-        output_voxel_map = np.zeros(
-            [self.combined_cell_count_cpu, 8], np.float32)
-
-        self.__make_voxel_pointcloud[blockspergrid, self.threads_per_block_3D](
-            self.combined_index_map,self.combined_hit_count,self.combined_total_count,self.voxels_eigenvalues, self.combined_origin, output_voxel_map, self.xy_size, self.z_size, self.xy_resolution, self.z_resolution)
-
+        output_voxel_map = np.zeros([self.combined_cell_count_cpu, 8], np.float32)
+        self.__make_voxel_pointcloud[blockspergrid, self.threads_per_block_3D](self.combined_index_map, self.combined_hit_count, self.combined_total_count,
+                                                                               self.voxels_eigenvalues, self.combined_origin, output_voxel_map,
+                                                                               self.combined_xy_size, self.combined_z_size, self.xy_resolution,
+                                                                               self.z_resolution)
+        self.combined_semaphore.release()
         return output_voxel_map
 
     def make_debug_height_map(self):
