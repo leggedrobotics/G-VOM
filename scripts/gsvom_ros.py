@@ -60,7 +60,7 @@ class VoxelMapper:
         model_weights_path = rospy.get_param("~association_model_weights_path")
         geometric_feature_type = rospy.get_param("~geometric_feature_type")
         feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
-        association_model, feature_extractor, place_label_threshold = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
+        association_model, feature_extractor, place_label_threshold, skip_pixels = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
                                                                                         geometric_feature_type, feature_extractor_weights_path)
         
         self.voxel_mapper = gsvom.Gsvom(
@@ -85,6 +85,7 @@ class VoxelMapper:
             association_model,
             feature_extractor,
             place_label_threshold,
+            skip_pixels,
             use_dynamic_combined_map)
 
         self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl',

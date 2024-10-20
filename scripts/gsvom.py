@@ -35,13 +35,14 @@ class Gsvom:
     association_model:              A torch NN used for image feature to voxel map association
     geometric_feature_extractor:    A torch NN used to extract geometric features from geometric contexts
     place_label_threshold:          If the label association model output is higher than this, the label is associated with the voxel in question
+    skip_pixels:                    How many columns and rows in an image should be skipped when extracting semantics (image subsapling)
     use_dynamic_global_map:         If true the map pointclouds get integrated to will move with the robot, otherwise it will stay static and change size
     """
 
     def __init__(self, xy_resolution, z_resolution, xy_size, z_size, buffer_size, min_distance, positive_obstacle_threshold,
                  negative_obstacle_threshold, slope_obstacle_threshold, robot_height, robot_radius, ground_to_lidar_height,
                  xy_eigen_dist, z_eigen_dist, label_length, num_labels, semantic_assignment_distance, geometric_context_size, association_model,
-                 geometric_feature_extractor, place_label_threshold, use_dynamic_combined_map):
+                 geometric_feature_extractor, place_label_threshold, skip_pixels, use_dynamic_combined_map):
 
         self.xy_resolution = xy_resolution
         self.z_resolution = z_resolution
@@ -69,6 +70,7 @@ class Gsvom:
         self.label_count = num_labels
         self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.association_threshold = place_label_threshold
+        self.skip_pixels = skip_pixels
 
         self.label_association_model = association_model
         self.feature_extractor = geometric_feature_extractor
@@ -229,7 +231,7 @@ class Gsvom:
             return
 
         semantic_merging_start_event = cuda.event()
-        semantics_merging_end_event = cuda.event()
+        semantic_merging_end_event = cuda.event()
         semantic_merging_start_event.record()
 
         image_width = segmented_image.shape[0]
@@ -237,9 +239,8 @@ class Gsvom:
         camera_to_world_gpu = cuda.to_device(camera_to_world)
         projection_matrix = cuda.to_device(projection_matrix)
 
-        skip_pixels = 4
-        x_indices = np.arange(0, image_width, skip_pixels)
-        y_indices = np.arange(0, image_height, skip_pixels)
+        x_indices = np.arange(0, image_width, self.skip_pixels)
+        y_indices = np.arange(0, image_height, self.skip_pixels)
         xx, yy = np.meshgrid(x_indices, y_indices)
         sampled_rays = np.stack((xx.flatten(), yy.flatten()), axis=1)
 
@@ -339,10 +340,10 @@ class Gsvom:
                                                                                    self.combined_labels)
         self.combined_semaphore.release()
 
-        semantics_merging_end_event.record()
-        semantics_merging_end_event.synchronize()
-        semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantics_merging_end_event)
-        # print(f"Semantics merging time: {semantics_merging_time} ms")
+        semantic_merging_end_event.record()
+        semantic_merging_end_event.synchronize()
+        semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantic_merging_end_event)
+        print(f"Merging semantics took {semantics_merging_time} ms.")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """

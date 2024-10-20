@@ -10,10 +10,11 @@ from semantic_association.mlp_geom_context import GeomContMlpFeatures
 
 
 def get_trained_model(model_version: str, num_labels: int, model_weights_path: str, feature_version: str=None,
-                      feature_weights_path: str="") -> Tuple[torch.nn.Module, torch.nn.Module, float]:
+                      feature_weights_path: str="") -> Tuple[torch.nn.Module, torch.nn.Module, float, int]:
     geometric_context_length = 128
     geometric_feature_length = 16
     feature_extractor = None
+    skip_pixels = 1
 
     if model_version == "Single":
         model = BenchmarkSingleVoxel(0.3)
@@ -25,13 +26,14 @@ def get_trained_model(model_version: str, num_labels: int, model_weights_path: s
         model = ModelV7(geometric_context_length, num_labels, geometric_feature_length)
         feature_extractor = get_feature_extractor(feature_version, feature_weights_path)
         place_label_threshold = 0.0
+        skip_pixels = 4
     else:
         print(f"[ERROR] Unknown model version '{model_version}'!")
         exit(1)
 
     if model_version != "Single":
         model.load_state_dict(torch.load(model_weights_path))
-    return  model, feature_extractor, place_label_threshold
+    return  model, feature_extractor, place_label_threshold, skip_pixels
 
 def get_feature_extractor(extractor_version: str, feature_weights_path: str) -> torch.nn.Module:
     geometric_feature_length = 16
