@@ -581,7 +581,7 @@ class Gsvom:
 
         self.combined_semaphore.acquire()
         occupied_cell_count = self.combined_cell_count_cpu
-        out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=float))
+        out_points = cuda.to_device(np.zeros((occupied_cell_count, 3), dtype=np.float32))
         out_labels = cuda.to_device(np.zeros((occupied_cell_count, self.label_length), dtype=np.uint8))
 
         blockspergrid_xy = math.ceil(self.combined_xy_size / self.threads_per_block_3D[0])

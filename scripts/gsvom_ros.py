@@ -93,6 +93,14 @@ class VoxelMapper:
                                      'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house',
                                      'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf',
                                      'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
+        self.class_colors = np.array([[150, 150, 150], [112, 105, 191], [89, 121, 72], [29, 26, 199], [242, 107, 146], [68, 218, 116], [54, 72, 205], [152, 3, 129],
+                                      [98, 55, 74], [58, 19, 33], [120, 0, 200], [180, 191, 29], [99, 242, 104], [203, 102, 204], [109, 206, 24], [164, 194, 17],
+                                      [245, 22, 110], [237, 33, 141], [66, 226, 253], [192, 255, 193], [185, 243, 231], [243, 215, 145], [160, 113, 101],
+                                      [53, 118, 126], [3, 177, 32], [186, 139, 153], [71, 146, 227], [215, 4, 215], [217, 173, 183], [69, 148, 46], [239, 85, 20],
+                                      [108, 116, 224], [56, 214, 26], [179, 147, 43], [48, 188, 172], [64, 86, 142], [118, 193, 163], [14, 32, 79], [59, 37, 212],
+                                      [84, 170, 220], [159, 58, 173], [63, 73, 209], [129, 235, 107], [231, 115, 40], [36, 74, 95], [13, 94, 165], [140, 167, 255],
+                                      [117, 93, 91], [183, 10, 186], [76, 110, 234], [5, 60, 233], [240, 59, 210]], dtype=np.float32)
+        self.class_colors /= 255
         self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
         self.bridge = CvBridge()
 
@@ -116,10 +124,11 @@ class VoxelMapper:
         self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
         self.voxel_hm_debug_pub = rospy.Publisher('~debug/height_map', PointCloud2, queue_size=1)
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
+        self.colored_map_debug_pub = rospy.Publisher('~debug/colored_pointcloud', PointCloud2, queue_size=1)
 
         self.visualization_timestep = 0
         self.visualization_file_directory = rospy.get_param("~vis_storage_path", "")
-        # self.visualization_timer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
+        self.visualization_timer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
 
@@ -132,7 +141,10 @@ class VoxelMapper:
 
         robot_pos = self.robot_position
         lidar_frame = data.header.frame_id
-        trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp, rospy.Duration(1))
+        try:
+            trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp, rospy.Duration(1))
+        except tf.ExtrapolationException:
+            return
         translation = np.zeros([3])
         translation[0] = trans.transform.translation.x
         translation[1] = trans.transform.translation.y
@@ -253,14 +265,20 @@ class VoxelMapper:
         if vis_data is None:
             return
         voxel_centers, voxel_labels = vis_data
+        print(f"Voxel centers dtype: {voxel_centers.dtype}")
+        voxel_labels = voxel_labels.squeeze().astype(int)
+        voxel_colors = self.class_colors[voxel_labels]
 
-        map_center = np.mean(voxel_centers, axis=0)
-        voxel_centers -= map_center
+        publish_data = np.core.records.fromarrays((voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]),
+                                                  names="x,y,z,r,g,b")
+        self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
 
-        file_name = os.path.join(self.visualization_file_directory, "ros_data" + str(self.visualization_timestep) + ".npz")
-        np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
-        self.visualization_timestep += 1
-        rospy.loginfo("[G-SVOM] Stored painted map!")
+        # map_center = np.mean(voxel_centers, axis=0)
+        # voxel_centers -= map_center
+        # file_name = os.path.join(self.visualization_file_directory, "ros_data" + str(self.visualization_timestep) + ".npz")
+        # np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
+        # self.visualization_timestep += 1
+        rospy.loginfo("[G-SVOM] Published painted map!")
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')
