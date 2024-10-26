@@ -260,7 +260,7 @@ class Gsvom:
         ###### Get vectors indicating the environment density along a ray projected from each pixel ######
         sampled_rays = cuda.to_device(sampled_rays)
         density_vectors = torch.zeros((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.float16, device=self.torch_device)
-        max_num_occupied_voxels = int(0.5*nonzero_pixel_count*self.label_assignment_vector_length)
+        max_num_occupied_voxels = int(0.4*nonzero_pixel_count*self.label_assignment_vector_length)
         num_occupied_voxels = torch.zeros(1, dtype=torch.int32, device=self.torch_device)
         gc_indexes = -torch.ones((nonzero_pixel_count, self.label_assignment_vector_length), dtype=torch.int32, device=self.torch_device)
         occupied_voxel_coords = torch.zeros((max_num_occupied_voxels, 3), dtype=torch.int16, device=self.torch_device)
@@ -342,8 +342,8 @@ class Gsvom:
 
         semantic_merging_end_event.record()
         semantic_merging_end_event.synchronize()
-        semantics_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantic_merging_end_event)
-        print(f"Merging semantics took {semantics_merging_time} ms.")
+        semantic_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantic_merging_end_event)
+        print(f"Merging semantics took {semantic_merging_time} ms.")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """

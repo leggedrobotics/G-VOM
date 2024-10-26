@@ -17,7 +17,7 @@ def get_trained_model(model_version: str, num_labels: int, model_weights_path: s
     skip_pixels = 1
 
     if model_version == "Single":
-        model = BenchmarkSingleVoxel(0.3)
+        model = BenchmarkSingleVoxel(0.2)
         place_label_threshold = 0.5
     elif model_version == "v1":
         model = ModelV1(geometric_context_length, num_labels)
