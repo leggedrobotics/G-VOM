@@ -10,7 +10,6 @@
     	<remap from="~camera_info3" to="/gt_box/hdr_left/segmentation/camera_info" />
     	
     	<param name="~odom_frame" value="zed2i_odom"/>
-    	<param name="~vis_storage_path" value="~/painted_map_storage"/>
     	
         <param name="~association_model_type" value="v7"/>
         <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v7_trained_w_mlp.pt"/>
