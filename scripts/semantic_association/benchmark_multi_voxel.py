@@ -13,7 +13,7 @@ class BenchmarkMultiVoxel(nn.Module):
         super(BenchmarkMultiVoxel, self).__init__()
         self.density_threshold = density_threshold
 
-    def forward(self, semantic_label, geometry, ray_directions, ground_truth_guess=None):
+    def forward(self, semantic_label, geometry, ray_directions):
         mask = geometry > self.density_threshold
         batch_size = geometry.shape[0]
         context_length = geometry.shape[1]

@@ -3,6 +3,7 @@ import torch
 
 from semantic_association.benchmark_single_voxel import BenchmarkSingleVoxel
 from semantic_association.benchmark_multi_voxel import BenchmarkMultiVoxel
+from semantic_association.benchmark_all_voxels import BenchmarkAllVoxels
 from semantic_association.model_v1 import ModelV1
 from semantic_association.model_v7 import ModelV7
 
@@ -15,13 +16,16 @@ def get_trained_model(model_version: str, num_labels: int, model_weights_path: s
     geometric_context_length = 128
     geometric_feature_length = 16
     feature_extractor = None
-    skip_pixels = 1
+    skip_pixels = 2
 
     if model_version == "Single":
         model = BenchmarkSingleVoxel(0.2)
         place_label_threshold = 0.5
     elif model_version == "Multi":
         model = BenchmarkMultiVoxel(1e-5)
+        place_label_threshold = 0.5
+    elif model_version == "All":
+        model = BenchmarkAllVoxels()
         place_label_threshold = 0.5
     elif model_version == "v1":
         model = ModelV1(geometric_context_length, num_labels)
@@ -35,7 +39,7 @@ def get_trained_model(model_version: str, num_labels: int, model_weights_path: s
         print(f"[ERROR] Unknown model version '{model_version}'!")
         exit(1)
 
-    if model_version != "Single":
+    if model_version != "Single" and model_version != "Multi" and model_version != "All":
         model.load_state_dict(torch.load(model_weights_path))
     return  model, feature_extractor, place_label_threshold, skip_pixels
 
