@@ -20,9 +20,9 @@ class VoxelMapper:
         self.robot_position = None
 
         # TODO: Update this to Nones to be safe from doing unexpected things
-        self.intrinsic_camera_params = None
-        self.camera_to_world_transform_matrix = None
-        self.segmented_image = None
+        self.intrinsic_camera_params1 = None
+        self.camera1_to_world_transform_matrix = None
+        self.segmented_image1 = None
 
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -106,7 +106,7 @@ class VoxelMapper:
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
-        self.sub_image = rospy.Subscriber("~segmented_image", Image, self.cb_image, queue_size=1)
+        self.sub_image = rospy.Subscriber("~segmented_image", Image, self.cb_image1, queue_size=1)
         self.sub_camera_info = rospy.Subscriber("~camera_info", CameraInfo, self.cb_camera_info, queue_size=1)
         
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
@@ -137,6 +137,7 @@ class VoxelMapper:
 
     def cb_lidar(self, data):
         if self.robot_position is None:
+            rospy.logwarn("[G-SVOM] No robot position recorded!")
             return
 
         robot_pos = self.robot_position
@@ -144,50 +145,43 @@ class VoxelMapper:
         try:
             trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp, rospy.Duration(1))
         except tf.ExtrapolationException:
+            rospy.logwarn("[G-SVOM] Failed to get the lidar to world transform")
             return
-        translation = np.zeros([3])
-        translation[0] = trans.transform.translation.x
-        translation[1] = trans.transform.translation.y
-        translation[2] = trans.transform.translation.z
-        rotation = np.zeros([4])
-        rotation[0] = trans.transform.rotation.x
-        rotation[1] = trans.transform.rotation.y
-        rotation[2] = trans.transform.rotation.z
-        rotation[3] = trans.transform.rotation.w
-        tf_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
+        tf_matrix = self.transform_to_matrix(trans)
 
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_camera_info(self, data):
-        self.intrinsic_camera_params = data.K
+        self.intrinsic_camera_params1 = data.K
 
-    def cb_image(self, data):
+    def cb_image1(self, data):
+        if self.intrinsic_camera_params1 is None:
+            rospy.logwarn("[G-SVOM] No camera intrinsics!")
+            return
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
-        self.segmented_image = np.expand_dims(cv_image.T, axis=-1)
+        segmented_image1 = np.expand_dims(cv_image.T, axis=-1)
 
         camera_frame = data.header.frame_id
         try:
             camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
         except tf.ExtrapolationException:
+            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
             return
-        translation = np.zeros([3])
-        translation[0] = camera_to_world_trans.transform.translation.x
-        translation[1] = camera_to_world_trans.transform.translation.y
-        translation[2] = camera_to_world_trans.transform.translation.z
-        rotation = np.zeros([4])
-        rotation[0] = camera_to_world_trans.transform.rotation.x
-        rotation[1] = camera_to_world_trans.transform.rotation.y
-        rotation[2] = camera_to_world_trans.transform.rotation.z
-        rotation[3] = camera_to_world_trans.transform.rotation.w
-        self.camera_to_world_transform_matrix = self.tf_transformer.fromTranslationRotation(translation, rotation)
+        camera1_to_world_transform_matrix = self.transform_to_matrix(camera_to_world_trans)
+
+        intrinsic_matrix1 = np.array(self.intrinsic_camera_params1).reshape((3, 3))
+        self.voxel_mapper.process_semantics(segmented_image1.astype(np.int64), intrinsic_matrix1, camera1_to_world_transform_matrix)
 
     def cb_semantics_timer(self, event):
-        if self.segmented_image is None or self.intrinsic_camera_params is None:
-            return
-        intrinsic_matrix = np.array(self.intrinsic_camera_params).reshape((3, 3))
-        self.voxel_mapper.process_semantics(self.segmented_image.astype(np.int64), intrinsic_matrix, self.camera_to_world_transform_matrix)
-        self.segmented_image = None
+        # if self.segmented_image1 is None or self.intrinsic_camera_params1 is None:
+        #     rospy.logwarn("[G-SVOM] No image to merge!")
+        #     return
+        # intrinsic_matrix1 = np.array(self.intrinsic_camera_params1).reshape((3, 3))
+        # self.voxel_mapper.process_semantics(self.segmented_image1.astype(np.int64), intrinsic_matrix1, self.camera1_to_world_transform_matrix)
+        # self.segmented_image1 = None
+
+
         rospy.loginfo("[G-SVOM] Merged Semantics!")
 
     def cb_map_merge_timer(self, event):
@@ -263,14 +257,15 @@ class VoxelMapper:
     def cb_painted_pointcloud_storage(self, event):
         vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
         if vis_data is None:
+            rospy.logwarn("[G-SVOM] No painted pointcloud to show!")
             return
         voxel_centers, voxel_labels = vis_data
-        print(f"Voxel centers dtype: {voxel_centers.dtype}")
         voxel_labels = voxel_labels.squeeze().astype(int)
         voxel_colors = self.class_colors[voxel_labels]
 
-        publish_data = np.core.records.fromarrays((voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]),
-                                                  names="x,y,z,r,g,b")
+        publish_data = np.core.records.fromarrays(
+            (voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]),
+            names="x,y,z,r,g,b")
         self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
 
         # map_center = np.mean(voxel_centers, axis=0)
@@ -279,6 +274,19 @@ class VoxelMapper:
         # np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
         # self.visualization_timestep += 1
         rospy.loginfo("[G-SVOM] Published painted map!")
+
+    def transform_to_matrix(self, transform):
+        translation = np.zeros([3])
+        translation[0] = transform.transform.translation.x
+        translation[1] = transform.transform.translation.y
+        translation[2] = transform.transform.translation.z
+        rotation = np.zeros([4])
+        rotation[0] = transform.transform.rotation.x
+        rotation[1] = transform.transform.rotation.y
+        rotation[2] = transform.transform.rotation.z
+        rotation[3] = transform.transform.rotation.w
+        return self.tf_transformer.fromTranslationRotation(translation, rotation)
+
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')

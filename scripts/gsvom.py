@@ -343,7 +343,7 @@ class Gsvom:
         semantic_merging_end_event.record()
         semantic_merging_end_event.synchronize()
         semantic_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantic_merging_end_event)
-        print(f"Merging semantics took {semantic_merging_time} ms.")
+        # print(f"Merging semantics took {semantic_merging_time} ms.")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
