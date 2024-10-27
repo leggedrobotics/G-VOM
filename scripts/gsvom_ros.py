@@ -18,11 +18,9 @@ from semantic_association.association_models_factory import get_trained_model
 class VoxelMapper:
     def __init__(self):
         self.robot_position = None
-
-        # TODO: Update this to Nones to be safe from doing unexpected things
         self.intrinsic_camera_params1 = None
-        self.camera1_to_world_transform_matrix = None
-        self.segmented_image1 = None
+        self.intrinsic_camera_params2 = None
+        self.intrinsic_camera_params3 = None
 
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -106,9 +104,13 @@ class VoxelMapper:
 
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
-        self.sub_image = rospy.Subscriber("~segmented_image", Image, self.cb_image1, queue_size=1)
-        self.sub_camera_info = rospy.Subscriber("~camera_info", CameraInfo, self.cb_camera_info, queue_size=1)
-        
+        self.sub_image1 = rospy.Subscriber("~segmented_image1", Image, self.cb_image1, queue_size=1)
+        self.sub_camera_info1 = rospy.Subscriber("~camera_info1", CameraInfo, self.cb_camera1_info, queue_size=1)
+        self.sub_image2 = rospy.Subscriber("~segmented_image2", Image, self.cb_image2, queue_size=1)
+        self.sub_camera_info2 = rospy.Subscriber("~camera_info2", CameraInfo, self.cb_camera2_info, queue_size=1)
+        self.sub_image3 = rospy.Subscriber("~segmented_image3", Image, self.cb_image3, queue_size=1)
+        self.sub_camera_info3 = rospy.Subscriber("~camera_info3", CameraInfo, self.cb_camera3_info, queue_size=1)
+
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
         self.n_obstacle_map_pub = rospy.Publisher("~negative_obstacle_map", OccupancyGrid, queue_size=1)
@@ -118,7 +120,6 @@ class VoxelMapper:
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
         self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
-        self.semantics_merge_timer = rospy.Timer(rospy.Duration(0.5), self.cb_semantics_timer)
         
         self.lidar_debug_pub = rospy.Publisher('~debug/lidar', PointCloud2, queue_size=1)
         self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
@@ -127,7 +128,6 @@ class VoxelMapper:
         self.colored_map_debug_pub = rospy.Publisher('~debug/colored_pointcloud', PointCloud2, queue_size=1)
 
         self.visualization_timestep = 0
-        self.visualization_file_directory = rospy.get_param("~vis_storage_path", "")
         self.visualization_timer = rospy.Timer(rospy.Duration(0.2), self.cb_painted_pointcloud_storage)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
@@ -152,15 +152,15 @@ class VoxelMapper:
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
-    def cb_camera_info(self, data):
+    def cb_camera1_info(self, data):
         self.intrinsic_camera_params1 = data.K
 
     def cb_image1(self, data):
         if self.intrinsic_camera_params1 is None:
-            rospy.logwarn("[G-SVOM] No camera intrinsics!")
+            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 1!")
             return
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
-        segmented_image1 = np.expand_dims(cv_image.T, axis=-1)
+        segmented_image = np.expand_dims(cv_image.T, axis=-1)
 
         camera_frame = data.header.frame_id
         try:
@@ -168,21 +168,52 @@ class VoxelMapper:
         except tf.ExtrapolationException:
             rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
             return
-        camera1_to_world_transform_matrix = self.transform_to_matrix(camera_to_world_trans)
+        camera_to_world_transform_matrix = self.transform_to_matrix(camera_to_world_trans)
 
-        intrinsic_matrix1 = np.array(self.intrinsic_camera_params1).reshape((3, 3))
-        self.voxel_mapper.process_semantics(segmented_image1.astype(np.int64), intrinsic_matrix1, camera1_to_world_transform_matrix)
+        intrinsic_matrix = np.array(self.intrinsic_camera_params1).reshape((3, 3))
+        self.voxel_mapper.process_semantics(segmented_image.astype(np.int64), intrinsic_matrix, camera_to_world_transform_matrix)
 
-    def cb_semantics_timer(self, event):
-        # if self.segmented_image1 is None or self.intrinsic_camera_params1 is None:
-        #     rospy.logwarn("[G-SVOM] No image to merge!")
-        #     return
-        # intrinsic_matrix1 = np.array(self.intrinsic_camera_params1).reshape((3, 3))
-        # self.voxel_mapper.process_semantics(self.segmented_image1.astype(np.int64), intrinsic_matrix1, self.camera1_to_world_transform_matrix)
-        # self.segmented_image1 = None
+    def cb_camera2_info(self, data):
+        self.intrinsic_camera_params2 = data.K
 
+    def cb_image2(self, data):
+        if self.intrinsic_camera_params2 is None:
+            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 2!")
+            return
+        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        segmented_image = np.expand_dims(cv_image.T, axis=-1)
 
-        rospy.loginfo("[G-SVOM] Merged Semantics!")
+        camera_frame = data.header.frame_id
+        try:
+            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
+        except tf.ExtrapolationException:
+            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
+            return
+        camera_to_world_transform_matrix = self.transform_to_matrix(camera_to_world_trans)
+
+        intrinsic_matrix = np.array(self.intrinsic_camera_params2).reshape((3, 3))
+        self.voxel_mapper.process_semantics(segmented_image.astype(np.int64), intrinsic_matrix, camera_to_world_transform_matrix)
+
+    def cb_camera3_info(self, data):
+        self.intrinsic_camera_params3 = data.K
+
+    def cb_image3(self, data):
+        if self.intrinsic_camera_params3 is None:
+            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 3!")
+            return
+        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        segmented_image = np.expand_dims(cv_image.T, axis=-1)
+
+        camera_frame = data.header.frame_id
+        try:
+            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
+        except tf.ExtrapolationException:
+            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
+            return
+        camera_to_world_transform_matrix = self.transform_to_matrix(camera_to_world_trans)
+
+        intrinsic_matrix = np.array(self.intrinsic_camera_params3).reshape((3, 3))
+        self.voxel_mapper.process_semantics(segmented_image.astype(np.int64), intrinsic_matrix, camera_to_world_transform_matrix)
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
@@ -267,12 +298,6 @@ class VoxelMapper:
             (voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]),
             names="x,y,z,r,g,b")
         self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
-
-        # map_center = np.mean(voxel_centers, axis=0)
-        # voxel_centers -= map_center
-        # file_name = os.path.join(self.visualization_file_directory, "ros_data" + str(self.visualization_timestep) + ".npz")
-        # np.savez(file_name, voxel_centers=voxel_centers, voxel_labels=voxel_labels)
-        # self.visualization_timestep += 1
         rospy.loginfo("[G-SVOM] Published painted map!")
 
     def transform_to_matrix(self, transform):
