@@ -68,8 +68,8 @@ class VoxelMapper:
         visualization_colors_file_path = rospy.get_param("~visualization_colors_file")
 
         # Prepare the semantics to voxels association method
-        association_model, feature_extractor, place_label_threshold, skip_pixels = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
-                                                                                        geometric_feature_type, feature_extractor_weights_path)
+        association_model, feature_extractor, place_label_threshold, skip_pixels = get_trained_model(model_type, model_weights_path, geometric_feature_type,
+                                                                                                     feature_extractor_weights_path)
 
         # Prepare G-SVOM itself
         self.voxel_mapper = gsvom.Gsvom(self.xy_resolution,

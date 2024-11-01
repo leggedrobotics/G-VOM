@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 '''
-The simplest version of a 2D to 3D association network. It is just a two layer MLP. The input is the geometric context and the
+The simplest version of a 2D to 3D association network. It is just a two layer MLP. The input is the densities vector and the
 label concatenated.
 '''
 
@@ -17,10 +17,10 @@ class ModelV1(nn.Module):
         self.layer1 = nn.Linear(input_length, input_length)
         self.layer2 = nn.Linear(input_length, self.geometric_context_length)
 
-    def forward(self, semantic_label, geometry, ray_direction):
+    def forward(self, semantic_label, voxel_densities, ray_direction):
         if len(semantic_label.shape) == 1:
             semantic_label = semantic_label[None, :]
-        input_tensor = torch.cat((semantic_label, geometry), dim=1)
+        input_tensor = torch.cat((semantic_label, voxel_densities), dim=1)
         x = self.layer1(input_tensor)
         x = torch.sigmoid(x)
         output = self.layer2(x)

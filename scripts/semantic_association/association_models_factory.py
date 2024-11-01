@@ -11,10 +11,12 @@ from semantic_association.mlp_geom_context import GeomContMlpFeatures
 
 
 
-def get_trained_model(model_version: str, num_labels: int, model_weights_path: str, feature_version: str=None,
-                      feature_weights_path: str="") -> Tuple[torch.nn.Module, torch.nn.Module, float, int]:
+def get_trained_model(model_version: str, model_weights_path: str, feature_version: str=None, feature_weights_path: str="")\
+        -> Tuple[torch.nn.Module, torch.nn.Module, float, int]:
     geometric_context_length = 128
     geometric_feature_length = 16
+    num_labels = 52
+
     feature_extractor = None
     skip_pixels = 2
 
@@ -39,7 +41,7 @@ def get_trained_model(model_version: str, num_labels: int, model_weights_path: s
         print(f"[ERROR] Unknown model version '{model_version}'!")
         exit(1)
 
-    if model_version != "Single" and model_version != "Multi" and model_version != "All":
+    if model_version[0] == 'v':
         model.load_state_dict(torch.load(model_weights_path))
     return  model, feature_extractor, place_label_threshold, skip_pixels
 
