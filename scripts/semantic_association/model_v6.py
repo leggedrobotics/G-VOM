@@ -8,9 +8,9 @@ MLP, but includes the ray rotation matrix, positional embedding and geometric co
 '''
 
 
-class ModelV7(nn.Module):
+class ModelV6(nn.Module):
     def __init__(self, geometric_context_length: int, num_unique_labels: int, geom_feature_length: int):
-        super(ModelV7, self).__init__()
+        super(ModelV6, self).__init__()
         self.geometric_context_length = geometric_context_length
         self.geometric_feature_length = geom_feature_length
 
