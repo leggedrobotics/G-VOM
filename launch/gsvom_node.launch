@@ -12,8 +12,8 @@
     	<param name="~odom_frame" value="zed2i_odom"/>
     	
         <param name="~association_model_type" value="v6"/>
-        <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v6_trained_w_mlp.pt"/>
+        <param name="~association_model_weights_path" value="$(find gvom)/config/model_weights/model_v6_trained_w_mlp.pt"/>
         <param name="~geometric_feature_type" value="mlp"/>
-        <param name="~feature_extractor_weights_path" value="$(find gvom)/model_weights/v6_mlp_features_trained.pt"/>
+        <param name="~feature_extractor_weights_path" value="$(find gvom)/config/model_weights/v6_mlp_features_trained.pt"/>
     </node>
 </launch>
