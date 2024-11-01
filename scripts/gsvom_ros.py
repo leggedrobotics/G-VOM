@@ -146,14 +146,7 @@ class VoxelMapper:
             return
 
         robot_pos = self.robot_position
-        lidar_frame = data.header.frame_id
-        try:
-            trans = self.tfBuffer.lookup_transform(self.odom_frame, lidar_frame, data.header.stamp, rospy.Duration(1))
-        except tf.ExtrapolationException:
-            rospy.logwarn("[G-SVOM] Failed to get the lidar to world transform")
-            return
-        tf_matrix = self.transform_to_matrix(trans)
-
+        tf_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
         pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
@@ -164,16 +157,10 @@ class VoxelMapper:
         if self.intrinsic_camera_params1 is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 1!")
             return
+
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.image1 = np.expand_dims(cv_image.T, axis=-1)
-
-        camera_frame = data.header.frame_id
-        try:
-            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
-        except tf.ExtrapolationException:
-            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
-            return
-        self.trans1 = self.transform_to_matrix(camera_to_world_trans)
+        self.trans1 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_camera2_info(self, data):
         self.intrinsic_camera_params2 = data.K
@@ -182,16 +169,10 @@ class VoxelMapper:
         if self.intrinsic_camera_params2 is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 2!")
             return
+
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.image2 = np.expand_dims(cv_image.T, axis=-1)
-
-        camera_frame = data.header.frame_id
-        try:
-            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
-        except tf.ExtrapolationException:
-            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
-            return
-        self.trans2 = self.transform_to_matrix(camera_to_world_trans)
+        self.trans2 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_camera3_info(self, data):
         self.intrinsic_camera_params3 = data.K
@@ -200,16 +181,10 @@ class VoxelMapper:
         if self.intrinsic_camera_params3 is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 3!")
             return
+        
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.image3 = np.expand_dims(cv_image.T, axis=-1)
-
-        camera_frame = data.header.frame_id
-        try:
-            camera_to_world_trans = self.tfBuffer.lookup_transform(self.odom_frame, camera_frame, data.header.stamp, rospy.Duration(1))
-        except tf.ExtrapolationException:
-            rospy.logwarn("[G-SVOM] Failed to get the camera to world transform")
-            return
-        self.trans3 = self.transform_to_matrix(camera_to_world_trans)
+        self.trans3 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
@@ -306,7 +281,13 @@ class VoxelMapper:
         self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
         rospy.loginfo("[G-SVOM] Merged semantics!")
 
-    def transform_to_matrix(self, transform):
+    def get_transform_as_matrix(self, target_frame: str, source_frame: str, timestamp):
+        try:
+            transform = self.tfBuffer.lookup_transform(target_frame, source_frame, timestamp, rospy.Duration(1))
+        except tf.ExtrapolationException:
+            rospy.logwarn(f"[G-SVOM] Failed to get the transform from: '{source_frame}' to '{target_frame}'!")
+            return
+
         translation = np.zeros([3])
         translation[0] = transform.transform.translation.x
         translation[1] = transform.transform.translation.y
