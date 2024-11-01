@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-import os
 import numpy as np
 from PIL import Image
 
@@ -17,6 +16,7 @@ from semantic_association.association_models_factory import get_trained_model
 
 class VoxelMapper:
     def __init__(self):
+        # Received data storage variables
         self.robot_position = None
         self.camera1_intrinsics = None
         self.camera1_segmented_image = None
@@ -28,38 +28,42 @@ class VoxelMapper:
         self.camera3_segmented_image = None
         self.camera3_to_world_matrix = None
 
-
+        # Coordinate transformation related variables
         self.tfBuffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tfBuffer)
         self.tf_transformer = tf.TransformerROS()
 
         # Standard G-VOM parameters
-        self.odom_frame = rospy.get_param("~odom_frame", "odom")
         self.xy_resolution = rospy.get_param("~xy_resolution", 0.15)
-        self.z_resolution = rospy.get_param("~z_resolution", 0.15)
+        z_resolution = rospy.get_param("~z_resolution", 0.15)
         self.width = rospy.get_param("~width", 256)
-        self.height = rospy.get_param("~height", 64)
-        self.buffer_size = rospy.get_param("~buffer_size", 1)
-        self.min_point_distance = rospy.get_param("~min_point_distance", 1.0)
-        self.positive_obstacle_threshold = rospy.get_param("~positive_obstacle_threshold", 0.50)
-        self.negative_obstacle_threshold = rospy.get_param("~negative_obstacle_threshold", 0.5)
-        self.density_threshold = rospy.get_param("~density_threshold", 50)
-        self.slope_obsacle_threshold = rospy.get_param("~slope_obsacle_threshold", 0.3)
-        self.min_roughness = rospy.get_param("~min_roughness", -10)
-        self.max_roughness = rospy.get_param("~max_roughness", 0)
-        self.robot_height = rospy.get_param("~robot_height", 1.0)
-        self.robot_radius = rospy.get_param("~robot_radius", 0.75)
-        self.ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.6)
-        self.freq = rospy.get_param("~freq", 10.0) # Hz
-        self.xy_eigen_dist = rospy.get_param("~xy_eigen_dist", 1)
-        self.z_eigen_dist = rospy.get_param("~z_eigen_dist", 1)
+        height = rospy.get_param("~height", 64)
+        buffer_size = rospy.get_param("~buffer_size", 1)
+        min_point_distance = rospy.get_param("~min_point_distance", 1.0)
+        positive_obstacle_threshold = rospy.get_param("~positive_obstacle_threshold", 0.50)
+        negative_obstacle_threshold = rospy.get_param("~negative_obstacle_threshold", 0.5)
+        slope_obsacle_threshold = rospy.get_param("~slope_obsacle_threshold", 0.3)
+        robot_height = rospy.get_param("~robot_height", 1.0)
+        robot_radius = rospy.get_param("~robot_radius", 0.75)
+        ground_to_lidar_height = rospy.get_param("~ground_to_lidar_height", 0.6)
+        xy_eigen_dist = rospy.get_param("~xy_eigen_dist", 1)
+        z_eigen_dist = rospy.get_param("~z_eigen_dist", 1)
+        use_dynamic_combined_map = rospy.get_param("~use_dynamic_combined_map", True)
         # Semantics parameters
         semantic_label_length = 1
         number_of_semantic_labels = 52
         semantic_assignment_distance = 128
         geometric_context_size = 9
-        use_dynamic_combined_map = True
+        # Postprocessing parameters
+        self.density_threshold = rospy.get_param("~density_threshold", 50)
+        self.min_roughness = rospy.get_param("~min_roughness", -10)
+        self.max_roughness = rospy.get_param("~max_roughness", 0)
+        # Auxiliary parameters
+        self.odom_frame = rospy.get_param("~odom_frame", "odom")
+        map_merging_frequency = rospy.get_param("~map_freq", 10.0)  # Hz
+        semantics_merging_frequency = rospy.get_param("~semantics_freq", 5.0) # Hz
 
+        # Prepare the semantics to voxels association method
         model_type = rospy.get_param("~association_model_type")
         rospy.loginfo(f"[G-SVOM] Using semantic label association model: {model_type}")
         model_weights_path = rospy.get_param("~association_model_weights_path")
@@ -67,37 +71,33 @@ class VoxelMapper:
         feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
         association_model, feature_extractor, place_label_threshold, skip_pixels = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
                                                                                         geometric_feature_type, feature_extractor_weights_path)
-        
-        self.voxel_mapper = gsvom.Gsvom(
-            self.xy_resolution,
-            self.z_resolution,
-            self.width,
-            self.height,
-            self.buffer_size,
-            self.min_point_distance,
-            self.positive_obstacle_threshold,
-            self.negative_obstacle_threshold,
-            self.slope_obsacle_threshold,
-            self.robot_height,
-            self.robot_radius,
-            self.ground_to_lidar_height,
-            self.xy_eigen_dist,
-            self.z_eigen_dist,
-            semantic_label_length,
-            number_of_semantic_labels,
-            semantic_assignment_distance,
-            geometric_context_size,
-            association_model,
-            feature_extractor,
-            place_label_threshold,
-            skip_pixels,
-            use_dynamic_combined_map)
 
-        self.segmentation_classes = ['unlabeled', 'bicycle', 'car', 'traffic light', 'street sign', 'bench', 'umbrella', 'skateboard', 'plate', 'bowl',
-                                     'sandwich', 'chair', 'potted plant', 'window', 'door', 'tv', 'remote', 'vase', 'banner', 'bush', 'cardboard',
-                                     'ceiling-other', 'cloth', 'cupboard', 'curtain', 'dirt', 'fence', 'floor-other', 'furniture-other', 'hill', 'house',
-                                     'leaves', 'light', 'mat', 'metal', 'plant-other', 'plastic', 'platform', 'railroad', 'rock', 'roof', 'sea', 'shelf',
-                                     'sky-other', 'skyscraper', 'stairs', 'straw', 'structural-other', 'table', 'tree', 'wall-other', 'wood']
+        # Prepare G-SVOM itself
+        self.voxel_mapper = gsvom.Gsvom(self.xy_resolution,
+                                        z_resolution,
+                                        self.width,
+                                        height,
+                                        buffer_size,
+                                        min_point_distance,
+                                        positive_obstacle_threshold,
+                                        negative_obstacle_threshold,
+                                        slope_obsacle_threshold,
+                                        robot_height,
+                                        robot_radius,
+                                        ground_to_lidar_height,
+                                        xy_eigen_dist,
+                                        z_eigen_dist,
+                                        semantic_label_length,
+                                        number_of_semantic_labels,
+                                        semantic_assignment_distance,
+                                        geometric_context_size,
+                                        association_model,
+                                        feature_extractor,
+                                        place_label_threshold,
+                                        skip_pixels,
+                                        use_dynamic_combined_map)
+
+        # Image processing and visualization variables
         self.class_colors = np.array([[150, 150, 150], [112, 105, 191], [89, 121, 72], [29, 26, 199], [242, 107, 146], [68, 218, 116], [54, 72, 205], [152, 3, 129],
                                       [98, 55, 74], [58, 19, 33], [120, 0, 200], [180, 191, 29], [99, 242, 104], [203, 102, 204], [109, 206, 24], [164, 194, 17],
                                       [245, 22, 110], [237, 33, 141], [66, 226, 253], [192, 255, 193], [185, 243, 231], [243, 215, 145], [160, 113, 101],
@@ -106,9 +106,9 @@ class VoxelMapper:
                                       [84, 170, 220], [159, 58, 173], [63, 73, 209], [129, 235, 107], [231, 115, 40], [36, 74, 95], [13, 94, 165], [140, 167, 255],
                                       [117, 93, 91], [183, 10, 186], [76, 110, 234], [5, 60, 233], [240, 59, 210]], dtype=np.float32)
         self.class_colors /= 255
-        self.segmentation_classes_str = ",".join(self.segmentation_classes[1:])
-        self.bridge = CvBridge()
+        self.ros_cv_bridge = CvBridge()
 
+        # Input data subscribers
         self.sub_cloud = rospy.Subscriber("~cloud", PointCloud2, self.cb_lidar, queue_size=1)
         self.sub_odom = rospy.Subscriber("~odom", Odometry, self.cb_odom, queue_size=1)
         self.sub_image1 = rospy.Subscriber("~segmented_image1", Image, self.cb_image1, queue_size=1)
@@ -118,6 +118,7 @@ class VoxelMapper:
         self.sub_image3 = rospy.Subscriber("~segmented_image3", Image, self.cb_image3, queue_size=1)
         self.sub_camera_info3 = rospy.Subscriber("~camera_info3", CameraInfo, self.cb_camera3_info, queue_size=1)
 
+        # Output data publishers
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
         self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
         self.n_obstacle_map_pub = rospy.Publisher("~negative_obstacle_map", OccupancyGrid, queue_size=1)
@@ -126,12 +127,14 @@ class VoxelMapper:
         self.a_certainty_pub = rospy.Publisher("~all_ground_certainty_map", OccupancyGrid, queue_size=1)
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
-        self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
-        self.semantics_merge_timer = rospy.Timer(rospy.Duration(0.2), self.cb_merge_semantics)
-
+        # Debug data publishers
         self.voxel_hm_debug_pub = rospy.Publisher('~debug/height_map', PointCloud2, queue_size=1)
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
         self.colored_map_debug_pub = rospy.Publisher('~debug/colored_pointcloud', PointCloud2, queue_size=1)
+
+        # Map merging and semantics association timers
+        self.map_merge_timer = rospy.Timer(rospy.Duration(1.0/map_merging_frequency), self.cb_map_merge_timer)
+        self.semantics_merge_timer = rospy.Timer(rospy.Duration(1.0/semantics_merging_frequency), self.cb_merge_semantics)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
 
@@ -156,7 +159,7 @@ class VoxelMapper:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 1!")
             return
 
-        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera1_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera1_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
@@ -168,7 +171,7 @@ class VoxelMapper:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 2!")
             return
 
-        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera2_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera2_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
@@ -180,7 +183,7 @@ class VoxelMapper:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 3!")
             return
 
-        cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
+        cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera3_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera3_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
