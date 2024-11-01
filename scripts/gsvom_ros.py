@@ -65,7 +65,6 @@ class VoxelMapper:
 
         # Prepare the semantics to voxels association method
         model_type = rospy.get_param("~association_model_type")
-        rospy.loginfo(f"[G-SVOM] Using semantic label association model: {model_type}")
         model_weights_path = rospy.get_param("~association_model_weights_path")
         geometric_feature_type = rospy.get_param("~geometric_feature_type")
         feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
@@ -152,7 +151,7 @@ class VoxelMapper:
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
         if map_data is None:
-            rospy.loginfo("[G-SVOM] No map data to publish!")
+            rospy.logwarn("[G-SVOM] No map data to publish!")
             return
 
         map_origin = map_data[0]
@@ -282,7 +281,7 @@ class VoxelMapper:
         try:
             transform = self.tfBuffer.lookup_transform(target_frame, source_frame, timestamp, rospy.Duration(1))
         except tf.ExtrapolationException:
-            rospy.logwarn(f"[G-SVOM] Failed to get the transform from: '{source_frame}' to '{target_frame}'!")
+            rospy.logerr(f"[G-SVOM] Failed to get the transform from: '{source_frame}' to '{target_frame}'!")
             return
 
         translation = np.zeros([3])
