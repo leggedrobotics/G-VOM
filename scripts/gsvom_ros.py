@@ -65,7 +65,6 @@ class VoxelMapper:
         # Auxiliary parameters
         self.odom_frame = rospy.get_param("~odom_frame", "odom")
         map_merging_frequency = rospy.get_param("~map_freq", 10.0)  # Hz
-        semantics_merging_frequency = rospy.get_param("~semantics_freq", 5.0) # Hz
         visualization_colors_file_path = rospy.get_param("~visualization_colors_file")
 
         # Prepare the semantics to voxels association method
@@ -127,9 +126,8 @@ class VoxelMapper:
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
         self.colored_map_debug_pub = rospy.Publisher('~debug/colored_pointcloud', PointCloud2, queue_size=1)
 
-        # Map merging and semantics association timers
+        # Map merging timer
         self.map_merge_timer = rospy.Timer(rospy.Duration(1.0/map_merging_frequency), self.cb_map_merge_timer)
-        self.semantics_merge_timer = rospy.Timer(rospy.Duration(1.0/semantics_merging_frequency), self.cb_merge_semantics)
 
         rospy.loginfo("[G-SVOM] Voxel mapper successfully started!")
 
@@ -147,19 +145,37 @@ class VoxelMapper:
         self.voxel_mapper.process_pointcloud(point_cloud, robot_pos, lidar_to_world_transform)
 
     def cb_map_merge_timer(self, event):
+        # Merge intermediate maps into the combined map
         map_data = self.voxel_mapper.combine_maps()
         if map_data is None:
             rospy.logwarn("[G-SVOM] No map data to publish!")
             return
-
         map_origin = map_data[0]
         positive_obstacle_map = map_data[1]
         negative_obstacle_map = map_data[2]
         roughness_map = map_data[3]
         cert_map = map_data[4]
 
-        current_time = rospy.Time.now()
+        # Merge semantics into the combined map
+        merged_semantics = False
+        if not (self.camera1_intrinsics is None or self.camera1_segmented_image is None or self.camera1_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera1_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera1_segmented_image.astype(np.int64), intrinsic_matrix, self.camera1_to_world_matrix)
+            merged_semantics = True
+        if not (self.camera2_intrinsics is None or self.camera2_segmented_image is None or self.camera2_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera2_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera2_segmented_image.astype(np.int64), intrinsic_matrix, self.camera2_to_world_matrix)
+            merged_semantics = True
+        if not (self.camera3_intrinsics is None or self.camera3_segmented_image is None or self.camera3_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera3_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera3_segmented_image.astype(np.int64), intrinsic_matrix, self.camera3_to_world_matrix)
+            merged_semantics = True
+        if not merged_semantics:
+            rospy.logwarn("[G-SVOM] Didn't merge any semantics!")
 
+        ###### Publish output maps ######
+
+        current_time = rospy.Time.now()
         out_map = OccupancyGrid()
         out_map.header.stamp = current_time
         out_map.header.frame_id = self.odom_frame
@@ -195,6 +211,20 @@ class VoxelMapper:
         roughness_map = 100 * ((np.maximum(np.minimum(roughness_map, self.max_roughness), self.min_roughness) + self.min_roughness) / roughness_range)
         out_map.data = np.reshape(roughness_map, -1, order='F').astype(np.int8)
         self.r_map_pub.publish(out_map)
+
+        # Map as painted occupancy point cloud
+        vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
+        if not (vis_data is None):
+            voxel_centers, voxel_labels = vis_data
+            voxel_labels = voxel_labels.squeeze().astype(int)
+            voxel_colors = self.class_colors[voxel_labels]
+
+            field_data = [voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]]
+            field_names = "x,y,z,r,g,b"
+            publish_data = np.core.records.fromarrays(field_data, names=field_names)
+            self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, current_time, self.odom_frame))
+        else:
+            rospy.logwarn("[G-SVOM] No painted point cloud to show!")
 
         ###### Debug maps ######
         # Voxel height map
@@ -239,41 +269,6 @@ class VoxelMapper:
         cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera3_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera3_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
-
-    def cb_merge_semantics(self, event):
-        # Merge semantics
-        merged_semantics = False
-        if not (self.camera1_intrinsics is None or self.camera1_segmented_image is None or self.camera1_to_world_matrix is None):
-            intrinsic_matrix = np.array(self.camera1_intrinsics).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.camera1_segmented_image.astype(np.int64), intrinsic_matrix, self.camera1_to_world_matrix)
-            merged_semantics = True
-        if not (self.camera2_intrinsics is None or self.camera2_segmented_image is None or self.camera2_to_world_matrix is None):
-            intrinsic_matrix = np.array(self.camera2_intrinsics).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.camera2_segmented_image.astype(np.int64), intrinsic_matrix, self.camera2_to_world_matrix)
-            merged_semantics = True
-        if not (self.camera3_intrinsics is None or self.camera3_segmented_image is None or self.camera3_to_world_matrix is None):
-            intrinsic_matrix = np.array(self.camera3_intrinsics).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.camera3_segmented_image.astype(np.int64), intrinsic_matrix, self.camera3_to_world_matrix)
-            merged_semantics = True
-        if not merged_semantics:
-            rospy.logwarn("[G-SVOM] Didn't merge any semantics!")
-
-        # Publish painted occupancy pointcloud
-        vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
-        if vis_data is None:
-            rospy.logwarn("[G-SVOM] No painted point cloud to show!")
-            return
-
-        voxel_centers, voxel_labels = vis_data
-        voxel_labels = voxel_labels.squeeze().astype(int)
-        voxel_colors = self.class_colors[voxel_labels]
-
-        field_data = [voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]]
-        field_names = "x,y,z,r,g,b"
-        publish_data = np.core.records.fromarrays(field_data, names=field_names)
-        self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
-
-        rospy.loginfo("[G-SVOM] Merged semantics!")
 
     def get_transform_as_matrix(self, target_frame: str, source_frame: str, timestamp):
         try:
