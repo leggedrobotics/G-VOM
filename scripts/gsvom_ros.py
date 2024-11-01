@@ -216,16 +216,13 @@ class VoxelMapper:
             field_names = 'x,y,z'
             voxel_inf_hm = np.core.records.fromarrays(field_values, names=field_names)
             self.voxel_inf_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_inf_hm, current_time, self.odom_frame))
+
         rospy.loginfo("[G-SVOM] Published maps!")
 
     def cb_camera1_info(self, data):
         self.camera1_intrinsics = data.K
 
     def cb_image1(self, data):
-        if self.camera1_intrinsics is None:
-            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 1!")
-            return
-
         cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera1_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera1_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
@@ -234,10 +231,6 @@ class VoxelMapper:
         self.camera2_intrinsics = data.K
 
     def cb_image2(self, data):
-        if self.camera2_intrinsics is None:
-            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 2!")
-            return
-
         cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera2_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera2_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
@@ -246,37 +239,43 @@ class VoxelMapper:
         self.camera3_intrinsics = data.K
 
     def cb_image3(self, data):
-        if self.camera3_intrinsics is None:
-            rospy.logwarn("[G-SVOM] No camera intrinsics for camera 3!")
-            return
-
         cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera3_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera3_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_merge_semantics(self, event):
+        # Merge semantics
+        merged_semantics = False
         if not (self.camera1_intrinsics is None or self.camera1_segmented_image is None or self.camera1_to_world_matrix is None):
             intrinsic_matrix = np.array(self.camera1_intrinsics).reshape((3, 3))
             self.voxel_mapper.process_semantics(self.camera1_segmented_image.astype(np.int64), intrinsic_matrix, self.camera1_to_world_matrix)
+            merged_semantics = True
         if not (self.camera2_intrinsics is None or self.camera2_segmented_image is None or self.camera2_to_world_matrix is None):
             intrinsic_matrix = np.array(self.camera2_intrinsics).reshape((3, 3))
             self.voxel_mapper.process_semantics(self.camera2_segmented_image.astype(np.int64), intrinsic_matrix, self.camera2_to_world_matrix)
+            merged_semantics = True
         if not (self.camera3_intrinsics is None or self.camera3_segmented_image is None or self.camera3_to_world_matrix is None):
             intrinsic_matrix = np.array(self.camera3_intrinsics).reshape((3, 3))
             self.voxel_mapper.process_semantics(self.camera3_segmented_image.astype(np.int64), intrinsic_matrix, self.camera3_to_world_matrix)
+            merged_semantics = True
+        if not merged_semantics:
+            rospy.logwarn("[G-SVOM] Didn't merge any semantics!")
 
+        # Publish painted occupancy pointcloud
         vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
         if vis_data is None:
-            rospy.logwarn("[G-SVOM] No painted pointcloud to show!")
+            rospy.logwarn("[G-SVOM] No painted point cloud to show!")
             return
+
         voxel_centers, voxel_labels = vis_data
         voxel_labels = voxel_labels.squeeze().astype(int)
         voxel_colors = self.class_colors[voxel_labels]
 
-        publish_data = np.core.records.fromarrays(
-            (voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]),
-            names="x,y,z,r,g,b")
+        field_data = [voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]]
+        field_names = "x,y,z,r,g,b"
+        publish_data = np.core.records.fromarrays(field_data, names=field_names)
         self.colored_map_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(publish_data, rospy.Time.now(), self.odom_frame))
+
         rospy.loginfo("[G-SVOM] Merged semantics!")
 
     def get_transform_as_matrix(self, target_frame: str, source_frame: str, timestamp):
@@ -290,17 +289,20 @@ class VoxelMapper:
         translation[0] = transform.transform.translation.x
         translation[1] = transform.transform.translation.y
         translation[2] = transform.transform.translation.z
+
         rotation = np.zeros([4])
         rotation[0] = transform.transform.rotation.x
         rotation[1] = transform.transform.rotation.y
         rotation[2] = transform.transform.rotation.z
         rotation[3] = transform.transform.rotation.w
+
         return self.tf_transformer.fromTranslationRotation(translation, rotation)
 
             
 if __name__ == '__main__':
     rospy.init_node('gsvom_voxel_mapping')
     node = VoxelMapper()
+
     while not rospy.is_shutdown():
         rospy.spin()
 
