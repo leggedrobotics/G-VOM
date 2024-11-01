@@ -141,7 +141,7 @@ class Gsvom:
         self.ego_semaphore = threading.Semaphore()
         self.ego_position = [0,0,0]
 
-    def process_pointcloud(self, pointcloud, ego_position, lidar_to_world, current_timestep):
+    def process_pointcloud(self, pointcloud, ego_position, lidar_to_world, current_timestep=0):
         """ Imports a pointcloud, processes it into a voxel map then adds the map to the buffer"""
         ###### Initialization #####
         self.ego_semaphore.acquire()

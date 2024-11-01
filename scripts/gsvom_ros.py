@@ -120,11 +120,9 @@ class VoxelMapper:
 
         # Output data publishers
         self.s_obstacle_map_pub = rospy.Publisher("~soft_obstacle_map", OccupancyGrid, queue_size=1)
-        self.p_obstacle_map_pub = rospy.Publisher("~positive_obstacle_map", OccupancyGrid, queue_size=1)
         self.n_obstacle_map_pub = rospy.Publisher("~negative_obstacle_map", OccupancyGrid, queue_size=1)
         self.h_obstacle_map_pub = rospy.Publisher("~hard_obstacle_map", OccupancyGrid, queue_size=1)
         self.g_certainty_pub = rospy.Publisher("~ground_certainty_map", OccupancyGrid, queue_size=1)
-        self.a_certainty_pub = rospy.Publisher("~all_ground_certainty_map", OccupancyGrid, queue_size=1)
         self.r_map_pub = rospy.Publisher("~roughness_map", OccupancyGrid, queue_size=1)
 
         # Debug data publishers
@@ -147,9 +145,78 @@ class VoxelMapper:
             return
 
         robot_pos = self.robot_position
-        tf_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
-        pc = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
-        self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
+        lidar_to_world_transform = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
+        point_cloud = ros_numpy.point_cloud2.pointcloud2_to_xyz_array(data)
+        self.voxel_mapper.process_pointcloud(point_cloud, robot_pos, lidar_to_world_transform)
+
+    def cb_map_merge_timer(self, event):
+        map_data = self.voxel_mapper.combine_maps()
+        if map_data is None:
+            rospy.loginfo("[G-SVOM] No map data to publish!")
+            return
+
+        map_origin = map_data[0]
+        positive_obstacle_map = map_data[1]
+        negative_obstacle_map = map_data[2]
+        roughness_map = map_data[3]
+        cert_map = map_data[4]
+
+        current_time = rospy.Time.now()
+
+        out_map = OccupancyGrid()
+        out_map.header.stamp = current_time
+        out_map.header.frame_id = self.odom_frame
+        out_map.info.resolution = self.xy_resolution
+        out_map.info.width = self.width
+        out_map.info.height = self.width
+        out_map.info.origin.orientation.x = 0
+        out_map.info.origin.orientation.y = 0
+        out_map.info.origin.orientation.z = 0
+        out_map.info.origin.orientation.w = 1
+        out_map.info.origin.position.x = map_origin[0]
+        out_map.info.origin.position.y = map_origin[1]
+        out_map.info.origin.position.z = 0
+
+        # Hard obstacles
+        out_map.data = np.reshape(np.maximum(100 * (positive_obstacle_map > self.density_threshold), negative_obstacle_map), -1, order='F').astype(np.int8)
+        self.h_obstacle_map_pub.publish(out_map)
+
+        # Soft obstacles
+        out_map.data = np.reshape(100 * (positive_obstacle_map <= self.density_threshold) * (positive_obstacle_map > 0), -1, order='F').astype(np.int8)
+        self.s_obstacle_map_pub.publish(out_map)
+
+        # Ground certainty
+        out_map.data = np.reshape(cert_map * 100, -1, order='F').astype(np.int8)
+        self.g_certainty_pub.publish(out_map)
+
+        # Negative obstacles
+        out_map.data = np.reshape(negative_obstacle_map, -1, order='F').astype(np.int8)
+        self.n_obstacle_map_pub.publish(out_map)
+
+        # Roughness
+        roughness_range = self.max_roughness - self.min_roughness
+        roughness_map = 100 * ((np.maximum(np.minimum(roughness_map, self.max_roughness), self.min_roughness) + self.min_roughness) / roughness_range)
+        out_map.data = np.reshape(roughness_map, -1, order='F').astype(np.int8)
+        self.r_map_pub.publish(out_map)
+
+        ###### Debug maps ######
+        # Voxel height map
+        voxel_hm = self.voxel_mapper.make_debug_height_map()
+        if voxel_hm is not None:
+            field_values = [voxel_hm[:, 0], voxel_hm[:, 1], voxel_hm[:, 2], voxel_hm[:, 3], voxel_hm[:, 4], voxel_hm[:, 5], voxel_hm[:, 6],
+                            positive_obstacle_map.flatten('F')]
+            field_names = 'x,y,z,roughness,slope_x,slope_y,slope,obstacles'
+            voxel_hm = np.core.records.fromarrays(field_values, names=field_names)
+            self.voxel_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_hm, current_time, self.odom_frame))
+
+        # Inferred height map
+        voxel_inf_hm = self.voxel_mapper.make_debug_inferred_height_map()
+        if voxel_inf_hm is not None:
+            field_values = [voxel_inf_hm[:, 0], voxel_inf_hm[:, 1], voxel_inf_hm[:, 2]]
+            field_names = 'x,y,z'
+            voxel_inf_hm = np.core.records.fromarrays(field_values, names=field_names)
+            self.voxel_inf_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_inf_hm, current_time, self.odom_frame))
+        rospy.loginfo("[G-SVOM] Published maps!")
 
     def cb_camera1_info(self, data):
         self.camera1_intrinsics = data.K
@@ -186,69 +253,6 @@ class VoxelMapper:
         cv_image = self.ros_cv_bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
         self.camera3_segmented_image = np.expand_dims(cv_image.T, axis=-1)
         self.camera3_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
-
-    def cb_map_merge_timer(self, event):
-        map_data = self.voxel_mapper.combine_maps()
-        if map_data is None:
-            rospy.loginfo("map_data is None. returning.")
-            return
-
-        map_origin = map_data[0]
-        obs_map = map_data[1]
-        neg_map = map_data[2]
-        rough_map = map_data[3]
-        cert_map = map_data[4]
-
-        out_map = OccupancyGrid()
-        out_map.header.stamp = rospy.Time.now()
-        out_map.header.frame_id = self.odom_frame
-        out_map.info.resolution = self.xy_resolution
-        out_map.info.width = self.width
-        out_map.info.height = self.width
-        out_map.info.origin.orientation.x = 0
-        out_map.info.origin.orientation.y = 0
-        out_map.info.origin.orientation.z = 0
-        out_map.info.origin.orientation.w = 1
-        out_map.info.origin.position.x = map_origin[0]
-        out_map.info.origin.position.y = map_origin[1]
-        out_map.info.origin.position.z = 0
-
-        # Hard obstacles
-        out_map.data = np.reshape(np.maximum(100 * (obs_map > self.density_threshold), neg_map), -1, order='F').astype(np.int8)
-        self.h_obstacle_map_pub.publish(out_map)
-
-        # Soft obstacles
-        out_map.data = np.reshape(100 * (obs_map <= self.density_threshold) * (obs_map > 0), -1, order='F').astype(np.int8)
-        self.s_obstacle_map_pub.publish(out_map)
-
-        # Ground certainty
-        out_map.data = np.reshape(cert_map*100, -1, order='F').astype(np.int8)
-        self.g_certainty_pub.publish(out_map)
-        self.a_certainty_pub.publish(out_map)
-
-        # Negative obstacles
-        out_map.data = np.reshape(neg_map, -1, order='F').astype(np.int8)
-        self.n_obstacle_map_pub.publish(out_map)
-
-        # Roughness
-        rough_map = ((np.maximum(np.minimum(rough_map, self.max_roughness), self.min_roughness) + self.min_roughness) / (self.max_roughness - self.min_roughness)) * 100
-        out_map.data = np.reshape(rough_map, -1, order='F').astype(np.int8)
-        self.r_map_pub.publish(out_map)
-
-        ###### Debug maps ######
-        # Voxel height map
-        voxel_hm = self.voxel_mapper.make_debug_height_map()
-        if voxel_hm is not None:
-            voxel_hm = np.core.records.fromarrays([voxel_hm[:,0], voxel_hm[:,1], voxel_hm[:,2], voxel_hm[:,3], voxel_hm[:,4], voxel_hm[:,5], voxel_hm[:,6], obs_map.flatten('F')],
-                                                  names='x,y,z,roughness,slope_x,slope_y,slope,obstacles')
-            self.voxel_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_hm, rospy.Time.now(), self.odom_frame))
-    
-        # Inferred height map
-        voxel_inf_hm = self.voxel_mapper.make_debug_inferred_height_map()
-        if voxel_inf_hm is not None:
-            voxel_inf_hm = np.core.records.fromarrays([voxel_inf_hm[:,0], voxel_inf_hm[:,1], voxel_inf_hm[:,2]], names='x,y,z')
-            self.voxel_inf_hm_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_inf_hm, rospy.Time.now(), self.odom_frame))
-        rospy.loginfo("[G-SVOM] Published maps!")
 
     def cb_merge_semantics(self, event):
         if not (self.camera1_intrinsics is None or self.camera1_segmented_image is None or self.camera1_to_world_matrix is None):
