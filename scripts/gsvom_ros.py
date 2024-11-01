@@ -54,6 +54,10 @@ class VoxelMapper:
         number_of_semantic_labels = 52
         semantic_assignment_distance = 128
         geometric_context_size = 9
+        model_type = rospy.get_param("~association_model_type")
+        model_weights_path = rospy.get_param("~association_model_weights_path")
+        geometric_feature_type = rospy.get_param("~geometric_feature_type")
+        feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
         # Postprocessing parameters
         self.density_threshold = rospy.get_param("~density_threshold", 50)
         self.min_roughness = rospy.get_param("~min_roughness", -10)
@@ -62,12 +66,9 @@ class VoxelMapper:
         self.odom_frame = rospy.get_param("~odom_frame", "odom")
         map_merging_frequency = rospy.get_param("~map_freq", 10.0)  # Hz
         semantics_merging_frequency = rospy.get_param("~semantics_freq", 5.0) # Hz
+        visualization_colors_file_path = rospy.get_param("~visualization_colors_file")
 
         # Prepare the semantics to voxels association method
-        model_type = rospy.get_param("~association_model_type")
-        model_weights_path = rospy.get_param("~association_model_weights_path")
-        geometric_feature_type = rospy.get_param("~geometric_feature_type")
-        feature_extractor_weights_path = rospy.get_param("~feature_extractor_weights_path")
         association_model, feature_extractor, place_label_threshold, skip_pixels = get_trained_model(model_type, number_of_semantic_labels, model_weights_path,
                                                                                         geometric_feature_type, feature_extractor_weights_path)
 
@@ -97,13 +98,10 @@ class VoxelMapper:
                                         use_dynamic_combined_map)
 
         # Image processing and visualization variables
-        self.class_colors = np.array([[150, 150, 150], [112, 105, 191], [89, 121, 72], [29, 26, 199], [242, 107, 146], [68, 218, 116], [54, 72, 205], [152, 3, 129],
-                                      [98, 55, 74], [58, 19, 33], [120, 0, 200], [180, 191, 29], [99, 242, 104], [203, 102, 204], [109, 206, 24], [164, 194, 17],
-                                      [245, 22, 110], [237, 33, 141], [66, 226, 253], [192, 255, 193], [185, 243, 231], [243, 215, 145], [160, 113, 101],
-                                      [53, 118, 126], [3, 177, 32], [186, 139, 153], [71, 146, 227], [215, 4, 215], [217, 173, 183], [69, 148, 46], [239, 85, 20],
-                                      [108, 116, 224], [56, 214, 26], [179, 147, 43], [48, 188, 172], [64, 86, 142], [118, 193, 163], [14, 32, 79], [59, 37, 212],
-                                      [84, 170, 220], [159, 58, 173], [63, 73, 209], [129, 235, 107], [231, 115, 40], [36, 74, 95], [13, 94, 165], [140, 167, 255],
-                                      [117, 93, 91], [183, 10, 186], [76, 110, 234], [5, 60, 233], [240, 59, 210]], dtype=np.float32)
+        self.class_colors = np.loadtxt(visualization_colors_file_path, dtype=np.float32)
+        if self.class_colors.shape[0] != number_of_semantic_labels:
+            rospy.logerr("[G-SVOM] The number of label visualization colors doesn't match the number of semantic labels!")
+            return
         self.class_colors /= 255
         self.ros_cv_bridge = CvBridge()
 

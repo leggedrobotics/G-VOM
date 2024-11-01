@@ -15,5 +15,6 @@
         <param name="~association_model_weights_path" value="$(find gvom)/config/model_weights/model_v6_trained_w_mlp.pt"/>
         <param name="~geometric_feature_type" value="mlp"/>
         <param name="~feature_extractor_weights_path" value="$(find gvom)/config/model_weights/v6_mlp_features_trained.pt"/>
+        <param name="~visualization_colors_file" value="$(find gvom)/config/label_colors.txt"/>
     </node>
 </launch>
