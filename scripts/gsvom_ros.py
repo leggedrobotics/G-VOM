@@ -18,15 +18,15 @@ from semantic_association.association_models_factory import get_trained_model
 class VoxelMapper:
     def __init__(self):
         self.robot_position = None
-        self.intrinsic_camera_params1 = None
-        self.image1 = None
-        self.trans1 = None
-        self.intrinsic_camera_params2 = None
-        self.image2 = None
-        self.trans2 = None
-        self.intrinsic_camera_params3 = None
-        self.image3 = None
-        self.trans3 = None
+        self.camera1_intrinsics = None
+        self.camera1_segmented_image = None
+        self.camera1_to_world_matrix = None
+        self.camera2_intrinsics = None
+        self.camera2_segmented_image = None
+        self.camera2_to_world_matrix = None
+        self.camera3_intrinsics = None
+        self.camera3_segmented_image = None
+        self.camera3_to_world_matrix = None
 
 
         self.tfBuffer = tf2_ros.Buffer()
@@ -128,9 +128,7 @@ class VoxelMapper:
 
         self.map_merge_timer = rospy.Timer(rospy.Duration(1. / self.freq), self.cb_map_merge_timer)
         self.semantics_merge_timer = rospy.Timer(rospy.Duration(0.2), self.cb_merge_semantics)
-        
-        self.lidar_debug_pub = rospy.Publisher('~debug/lidar', PointCloud2, queue_size=1)
-        self.voxel_debug_pub = rospy.Publisher('~debug/voxel', PointCloud2, queue_size=1)
+
         self.voxel_hm_debug_pub = rospy.Publisher('~debug/height_map', PointCloud2, queue_size=1)
         self.voxel_inf_hm_debug_pub = rospy.Publisher('~debug/inferred_height_map', PointCloud2, queue_size=1)
         self.colored_map_debug_pub = rospy.Publisher('~debug/colored_pointcloud', PointCloud2, queue_size=1)
@@ -151,40 +149,40 @@ class VoxelMapper:
         self.voxel_mapper.process_pointcloud(pc, robot_pos, tf_matrix, 0)
 
     def cb_camera1_info(self, data):
-        self.intrinsic_camera_params1 = data.K
+        self.camera1_intrinsics = data.K
 
     def cb_image1(self, data):
-        if self.intrinsic_camera_params1 is None:
+        if self.camera1_intrinsics is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 1!")
             return
 
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
-        self.image1 = np.expand_dims(cv_image.T, axis=-1)
-        self.trans1 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
+        self.camera1_segmented_image = np.expand_dims(cv_image.T, axis=-1)
+        self.camera1_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_camera2_info(self, data):
-        self.intrinsic_camera_params2 = data.K
+        self.camera2_intrinsics = data.K
 
     def cb_image2(self, data):
-        if self.intrinsic_camera_params2 is None:
+        if self.camera2_intrinsics is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 2!")
             return
 
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
-        self.image2 = np.expand_dims(cv_image.T, axis=-1)
-        self.trans2 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
+        self.camera2_segmented_image = np.expand_dims(cv_image.T, axis=-1)
+        self.camera2_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_camera3_info(self, data):
-        self.intrinsic_camera_params3 = data.K
+        self.camera3_intrinsics = data.K
 
     def cb_image3(self, data):
-        if self.intrinsic_camera_params3 is None:
+        if self.camera3_intrinsics is None:
             rospy.logwarn("[G-SVOM] No camera intrinsics for camera 3!")
             return
-        
+
         cv_image = self.bridge.imgmsg_to_cv2(data, desired_encoding="mono8")
-        self.image3 = np.expand_dims(cv_image.T, axis=-1)
-        self.trans3 = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
+        self.camera3_segmented_image = np.expand_dims(cv_image.T, axis=-1)
+        self.camera3_to_world_matrix = self.get_transform_as_matrix(self.odom_frame, data.header.frame_id, data.header.stamp)
 
     def cb_map_merge_timer(self, event):
         map_data = self.voxel_mapper.combine_maps()
@@ -235,13 +233,6 @@ class VoxelMapper:
         self.r_map_pub.publish(out_map)
 
         ###### Debug maps ######
-        # Voxel map
-        voxel_pc = self.voxel_mapper.make_debug_voxel_map()
-        if voxel_pc is not None:
-            voxel_pc = np.core.records.fromarrays([voxel_pc[:,0], voxel_pc[:,1], voxel_pc[:,2], voxel_pc[:,3], voxel_pc[:,4], voxel_pc[:,5], voxel_pc[:,6], voxel_pc[:,7]],
-                                                  names='x,y,z,solid factor,count,eigen_line,eigen_surface,eigen_point')
-            self.voxel_debug_pub.publish(ros_numpy.point_cloud2.array_to_pointcloud2(voxel_pc, rospy.Time.now(), self.odom_frame))
-
         # Voxel height map
         voxel_hm = self.voxel_mapper.make_debug_height_map()
         if voxel_hm is not None:
@@ -257,15 +248,15 @@ class VoxelMapper:
         rospy.loginfo("[G-SVOM] Published maps!")
 
     def cb_merge_semantics(self, event):
-        if not (self.intrinsic_camera_params1 is None or self.image1 is None or self.trans1 is None):
-            intrinsic_matrix = np.array(self.intrinsic_camera_params1).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.image1.astype(np.int64), intrinsic_matrix, self.trans1)
-        if not (self.intrinsic_camera_params2 is None or self.image2 is None or self.trans2 is None):
-            intrinsic_matrix = np.array(self.intrinsic_camera_params2).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.image2.astype(np.int64), intrinsic_matrix, self.trans2)
-        if not (self.intrinsic_camera_params3 is None or self.image3 is None or self.trans3 is None):
-            intrinsic_matrix = np.array(self.intrinsic_camera_params3).reshape((3, 3))
-            self.voxel_mapper.process_semantics(self.image3.astype(np.int64), intrinsic_matrix, self.trans3)
+        if not (self.camera1_intrinsics is None or self.camera1_segmented_image is None or self.camera1_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera1_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera1_segmented_image.astype(np.int64), intrinsic_matrix, self.camera1_to_world_matrix)
+        if not (self.camera2_intrinsics is None or self.camera2_segmented_image is None or self.camera2_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera2_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera2_segmented_image.astype(np.int64), intrinsic_matrix, self.camera2_to_world_matrix)
+        if not (self.camera3_intrinsics is None or self.camera3_segmented_image is None or self.camera3_to_world_matrix is None):
+            intrinsic_matrix = np.array(self.camera3_intrinsics).reshape((3, 3))
+            self.voxel_mapper.process_semantics(self.camera3_segmented_image.astype(np.int64), intrinsic_matrix, self.camera3_to_world_matrix)
 
         vis_data = self.voxel_mapper.get_map_as_painted_occupancy_pointcloud()
         if vis_data is None:
