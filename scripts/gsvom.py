@@ -229,10 +229,6 @@ class Gsvom:
             print("[WARN] There is no combined map to merge the semantics into! Nothing will happen.")
             return
 
-        semantic_merging_start_event = cuda.event()
-        semantic_merging_end_event = cuda.event()
-        semantic_merging_start_event.record()
-
         image_width = segmented_image.shape[0]
         image_height = segmented_image.shape[1]
         camera_to_world_gpu = cuda.to_device(camera_to_world)
@@ -338,11 +334,6 @@ class Gsvom:
                                                                                    self.label_assignment_vector_length, outputs, self.label_length,
                                                                                    self.combined_labels)
         self.combined_semaphore.release()
-
-        semantic_merging_end_event.record()
-        semantic_merging_end_event.synchronize()
-        semantic_merging_time = cuda.event_elapsed_time(semantic_merging_start_event, semantic_merging_end_event)
-        # print(f"Merging semantics took {semantic_merging_time} ms.")
 
     def combine_maps(self):
         """ Combines all maps in the buffer and processes the resultant map into 2D maps """
@@ -540,7 +531,7 @@ class Gsvom:
                                                                                     self.combined_hit_count,
                                                                                     self.combined_total_count, self.robot_height,
                                                                                     self.combined_origin,self.x_slope_map,
-                                                                                    self.y_slope_map,self.slope_obstacle_threshold,
+                                                                                    self.y_slope_map, self.slope_obstacle_threshold,
                                                                                     positive_obstacle_map)
 
         ###### Check for negative obstacles ######
@@ -627,7 +618,7 @@ class Gsvom:
         blockspergrid = (blockspergrid_xy, blockspergrid_xy)
         self.__make_height_map_pointcloud[blockspergrid, self.threads_per_block_2D](self.height_map, self.roughness_map, self.x_slope_map, self.y_slope_map,
                                                                                     self.combined_origin, output_height_map_voxel, self.xy_size,
-                                                                                    self.xy_resolution,self.z_resolution)
+                                                                                    self.xy_resolution, self.z_resolution)
         return output_height_map_voxel
 
     def make_debug_inferred_height_map(self):
@@ -782,9 +773,9 @@ class Gsvom:
         min_height_index = int(math.floor((min_obs_height/z_resolution) - origin[2])) + 1
         max_height_index = int(math.floor((max_obs_height/z_resolution) - origin[2]))
 
-        if not min_height_index >= 0 and min_height_index < z_size:
+        if not (min_height_index >= 0 and min_height_index < z_size):
             return
-        if not max_height_index >= 0 and max_height_index < z_size:
+        if not (max_height_index >= 0 and max_height_index < z_size):
             return
 
         density = 0.0
