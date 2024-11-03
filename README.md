@@ -1,68 +1,58 @@
-# G-VOM
-## A GPU Accelerated Voxel Off-Road Mapping System 
+# G-SVOM
+## A GPU Accelerated Semantic Voxel Off-Road Mapping System
 
-A Python 3 ROS package for lidar based off-road mapping.
+![Demo scene](readme_data/demo_map.png)
+![Entire voxel map](readme_data/demo_map_whole.jpg)
 
-![Output_maps](./images/4_maps.png)
+G-SVOM is a voxel mapping framework for path planning and navigation in unstructured, outdoor environments. It converts point clouds into geometric voxel maps
+containing not only occupancy information but also additional values, like hard and soft obstacle detection and slope estimates. Each voxel also contains a
+semantic label, which is provided from semantically segmented images. To assign the semantic labels  from images to the voxels, G-SVOM can use several different
+methods, from simple projection to a neural network, which takes into account the label being assigned and the geometric context of each candidate voxel.
 
+For a full explanation of how the different semantic label association methods work and the analysis of their strengths and weaknesses, please read our
+[report](readme_data/GSVOM_report.pdf). G-SVOM is an extension of G-VOM, which provides the geometric mapping backbone, we highly recommend checking out its
+[repository](https://github.com/unmannedlab/G-VOM) to learn about its full capabilities.
 
-##  Overview
+##  Usage
 
-G-VOM is a local 3D voxel mapping framework for off-road path planning and navigation. It provides both hard and soft positive obstacle detection, negative obstacle detection, slope estimation, and roughness estimation. By using a 3D array lookup table data structure and by leveraging the GPU it can provide online performance.
+### Prerequisities
 
-## Results
-![Vehicles](./images/vehicles.png)
+- [Python 3.6](https://www.python.org/downloads/) or later.
 
-We implemented G-VOM on three vehicles that were tested at the Texas A&M RELLIS campus. A Clearpath Robotics [Warthog](https://clearpathrobotics.com/warthog-unmanned-ground-vehicle-robot/) and [Moose](https://clearpathrobotics.com/moose-ugv/), and a [Polaris Ranger](https://ranger.polaris.com/en-us/). For sensing we used an Ouster OS1-64 lidar on the Warthog and an Ouster OS1-128 lidar on the Moose and Ranger.
-For all vehicles, the system was ran on a laptop with an Nvidia Quadro RTX 4000 GPU and an Intel i9-10885H CPU achieving a mapping rate from 9-12 Hz.
+- [Numba](https://numba.pydata.org/numba-doc/latest/user/installing.html) and [Numba CUDA](https://numba.pydata.org/numba-doc/latest/cuda/overview.html#setting-cuda-installation-path).
 
-The video below shows autonomous operation on the Warthog at 4 m/s.
+- [Numpy](https://numpy.org/install/)
 
-[![Long_path_video](https://img.youtube.com/vi/fgMx6gbHCk8/0.jpg)](https://youtu.be/fgMx6gbHCk8)
+- [Pytorch](https://pytorch.org/)
 
-For more detailed results see the paper.
+- (optional to run `gsvom_ros.py`) [ROS Noetic](http://wiki.ros.org/ROS/Installation)
 
-##  Prerequisites
-### **Ubuntu** 
-Ubuntu 64-bit 20.04.
+### Implementation explanation
 
-### **Python**
-[Python 3.6](https://www.python.org/downloads/) or later.
+The system is implemented within a class in `scripts/gsvom.py`. There are four public functions: Class initialization, `process_pointcloud`, `combine_maps`, and
+`process_semantics`. 
 
-### **Numba CUDA**
-Follow [Numba Installation](https://numba.pydata.org/numba-doc/latest/user/installing.html) and [Numba CUDA](https://numba.pydata.org/numba-doc/latest/cuda/overview.html#setting-cuda-installation-path).
+Class initialization initialises all parameters for the class. A description of each parameter is provided in the file. It is important to mention, that the
+class receives the semantic labels association method this way in a dependency injection scheme. The possible methods are implemented in the
+`scripts/semantic_association` folder, including a factory method to properly set them up.
 
-### **ROS**
-ROS Noetic. [ROS Installation](http://wiki.ros.org/ROS/Installation)
-Note, ROS is only needed to run gvom_ros.py.
-
-## Usage
-
-The system is implemented within a class in gvom.py. There are three public functions. Class initialization,  process_pointcloud, and combine_maps. 
-
-Class initialization initialises all parameters for the class. A description of each parameter is provided in the file.
-
-process_pointcloud takes the pointcloud, ego position, and optionally a transform matrix. It Imports a pointcloud and processes it into a voxel map then adds the map to the buffer. The transform matrix is necessary if the pointcloud is not in the world frame since all map processing is in the world frame..
+`process_pointcloud` takes a point cloud, robot position in the world frame, a transform matrix from the lidar frame to the world frame and optionally the
+current timestamp. It processes the point cloud into an intermediate voxel map then adds the map to the intermediate map buffer. The transform matrix is
+necessary as all map processing is in the world frame.
  
-combine_maps takes no inputs and processes all maps in the buffer into a set of 2D output maps. The outputs are the map origin, positive obstacle map, negative obstacle map, roughness map, and visibility map.
+`combine_maps` takes no inputs and processes all maps in the intermediate map buffer into a combined map and set of 2D output maps. The outputs are the map
+origin in the world frame, positive obstacle map, negative obstacle map, roughness map and a visibility map.
 
-Note process_pointcloud and combine_maps can be ran asynchronously. Multiple sensors can each call process_pointcloud however we recommend a buffer size greater than twice the number of sensors.
+`process_semantics` takes a semantically segmented image and the camera intrinsic and extrinsic calibration parameters and uses them to add semantic labels to
+the combined map created in `combine_maps`.
+
+Note: Multiple sensors can each call `process_pointcloud` in parallel and then be asynchronously
+merged with `combine_maps`, to do this we recommend a buffer size greater than twice the number of sensors. Because both `combine_maps` and `process_semantics`
+operate on the combined map, these two functions cannot be run in parallel.
 
 ### ROS Example
-An example ROS implementation is provided in gvom_ros.py. It subscribes to a PointCloud2 message and an Odometry message. Additionally, it requires a tf tree between the “odom_frame” and the PointCloud2 message’s frame. It’s assumed that the Odometry message is in the “odom_frame”.
+An example ROS implementation is provided in `scripts/gsvom_ros.py`. It subscribes to a `PointCloud2` message, an `Odometry` message and three `Image` and
+`CameraInfo`. Additionally, it requires a tf tree between the `odom_frame`, the `PointCloud2` message’s frame and the `Image` message's frame. It’s assumed that
+the `Odometry` message is in the `odom_frame`.
 
-## Cite Us
-~~~text
-@INPROCEEDINGS{overbye2021gvom,
-  author={Overbye, Timothy and Saripalli, Srikanth},
-  booktitle={2022 IEEE Intelligent Vehicles Symposium (IV)}, 
-  title={G-VOM: A GPU Accelerated Voxel Off-Road Mapping System}, 
-  year={2022},
-  volume={},
-  number={},
-  pages={1480-1486},
-  doi={10.1109/IV51971.2022.9827107}}
-~~~
-
-
-
+The example ROS node can also be launched using an example launch file in the `launch` directory.
