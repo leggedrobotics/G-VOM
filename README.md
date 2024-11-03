@@ -34,7 +34,8 @@ The system is implemented within a class in `scripts/gsvom.py`. There are four p
 
 Class initialization initialises all parameters for the class. A description of each parameter is provided in the file. It is important to mention, that the
 class receives the semantic labels association method this way in a dependency injection scheme. The possible methods are implemented in the
-`scripts/semantic_association` folder, including a factory method to properly set them up.
+`scripts/semantic_association` folder, including a factory method to properly set them up. The neural network-based methods (`ModelV1` and `ModelV6`) have
+their pretrained weights included in the `config/model_weights` folder and work out of the box for any camera configuration.
 
 `process_pointcloud` takes a point cloud, robot position in the world frame, a transform matrix from the lidar frame to the world frame and optionally the
 current timestamp. It processes the point cloud into an intermediate voxel map then adds the map to the intermediate map buffer. The transform matrix is
@@ -44,11 +45,16 @@ necessary as all map processing is in the world frame.
 origin in the world frame, positive obstacle map, negative obstacle map, roughness map and a visibility map.
 
 `process_semantics` takes a semantically segmented image and the camera intrinsic and extrinsic calibration parameters and uses them to add semantic labels to
-the combined map created in `combine_maps`.
+the combined map created in `combine_maps`. To use the `ModelV1` and `ModelV6` semantic label to voxel association methods, the semantically segmented images
+must contain only the labels listed in the `config/segmentation_classes.txt` file represented by their corresponding numbers. The other methods are semantic
+label agnostic.
 
 Note: Multiple sensors can each call `process_pointcloud` in parallel and then be asynchronously
 merged with `combine_maps`, to do this we recommend a buffer size greater than twice the number of sensors. Because both `combine_maps` and `process_semantics`
 operate on the combined map, these two functions cannot be run in parallel.
+
+The labeled voxel map can be visualized using the `get_map_as_painted_occupancy_pointcloud` function of the G-SVOM class. The color for each label is picked by
+the `config/label_colors.txt` file. How to use this function is shown in the ROS example.
 
 ### ROS Example
 An example ROS implementation is provided in `scripts/gsvom_ros.py`. It subscribes to a `PointCloud2` message, an `Odometry` message and three `Image` and
