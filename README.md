@@ -61,4 +61,9 @@ An example ROS implementation is provided in `scripts/gsvom_ros.py`. It subscrib
 `CameraInfo`. Additionally, it requires a tf tree between the `odom_frame`, the `PointCloud2` message’s frame and the `Image` message's frame. It’s assumed that
 the `Odometry` message is in the `odom_frame`.
 
-The example ROS node can also be launched using an example launch file in the `launch` directory.
+To run the example, follow these steps:
+
+1. Clone this repository to the `src` folder of your catkin workspace: `git clone git@github.com:leggedrobotics/G-VOM.git`
+2. Build the package `catkin build gsvom`
+3. Source the catkin workspace `source devel/setup.bash`
+4. Launch the ros node `roslaunch gsvom gsvom_node.launch`
