@@ -3,8 +3,7 @@ import torch.nn as nn
 
 
 '''
-This is one of the benchmark solutions. The semantic label is to be assigned to the first voxel along the ray that has 
-density higher then some threshold.
+The semantic label is to be assigned to the first continuous group of voxels that have a density higher than the specified threshold.
 '''
 
 
@@ -13,18 +12,18 @@ class BenchmarkMultiVoxel(nn.Module):
         super(BenchmarkMultiVoxel, self).__init__()
         self.density_threshold = density_threshold
 
-    def forward(self, semantic_label, geometry, ray_directions):
-        mask = geometry > self.density_threshold
-        batch_size = geometry.shape[0]
-        context_length = geometry.shape[1]
+    def forward(self, semantic_label, voxel_densities, ray_directions):
+        mask = voxel_densities > self.density_threshold
+        batch_size = voxel_densities.shape[0]
+        context_length = voxel_densities.shape[1]
 
-        output = torch.zeros(geometry.shape, dtype=torch.bool, device=geometry.device)
-        active = torch.ones(batch_size, dtype=torch.bool, device=geometry.device)
-        seen_one = torch.zeros(batch_size, dtype=torch.bool, device=geometry.device)
+        output = torch.zeros(voxel_densities.shape, dtype=torch.bool, device=voxel_densities.device)
+        active = torch.ones(batch_size, dtype=torch.bool, device=voxel_densities.device)
+        seen_one = torch.zeros(batch_size, dtype=torch.bool, device=voxel_densities.device)
         for col in range(context_length):
             output[:, col] = mask[:, col] & active
             seen_one |= mask[:, col]
             active &= (~seen_one) | (seen_one & mask[:, col])
             if (~active).all():
                 break
-        return output.float()
+        return output.half()

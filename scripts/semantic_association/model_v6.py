@@ -4,21 +4,23 @@ import math
 
 
 '''
-MLP, but includes the ray rotation matrix, positional embedding and geometric context
+MLP, but includes the ray rotation matrix, positional embedding and geometric context feature vectors
 '''
 
 
-class ModelV7(nn.Module):
+class ModelV6(nn.Module):
     def __init__(self, geometric_context_length: int, num_unique_labels: int, geom_feature_length: int):
-        super(ModelV7, self).__init__()
+        super(ModelV6, self).__init__()
         self.geometric_context_length = geometric_context_length
         self.geometric_feature_length = geom_feature_length
 
+        # Assemble the neural network
         input_length = num_unique_labels + geometric_context_length*geom_feature_length + 9
         self.layer1 = nn.Linear(input_length, 1024)
         self.layer2 = nn.Linear(1024, 512)
         self.layer3 = nn.Linear(512, self.geometric_context_length)
 
+        # Calculate the positional embeddings
         pe_dim = 2
         position = torch.arange(self.geometric_context_length).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, pe_dim, 2) * (-math.log(10000.0) / pe_dim))

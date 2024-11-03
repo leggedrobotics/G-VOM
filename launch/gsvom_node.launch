@@ -1,5 +1,5 @@
 <launch>
-    <node pkg="gvom" type="gsvom_ros.py" name="gsvom_ros" output="screen">
+    <node pkg="gsvom" type="gsvom_ros.py" name="gsvom_ros" output="screen">
     	<remap from="~cloud" to="/gt_box/livox/lidar" />
     	<remap from="~odom" to="/gt_box/zed2i/zed_node/odom" />
     	<remap from="~segmented_image1" to="/gt_box/hdr_front/segmentation/segmented_image" />
@@ -11,9 +11,10 @@
     	
     	<param name="~odom_frame" value="zed2i_odom"/>
     	
-        <param name="~association_model_type" value="v7"/>
-        <param name="~association_model_weights_path" value="$(find gvom)/model_weights/model_v7_trained_w_mlp.pt"/>
+        <param name="~association_model_type" value="v6"/>
+        <param name="~association_model_weights_path" value="$(find gsvom)/config/model_weights/model_v6_trained_w_mlp.pt"/>
         <param name="~geometric_feature_type" value="mlp"/>
-        <param name="~feature_extractor_weights_path" value="$(find gvom)/model_weights/v7_mlp_features_trained.pt"/>
+        <param name="~feature_extractor_weights_path" value="$(find gsvom)/config/model_weights/v6_mlp_features_trained.pt"/>
+        <param name="~visualization_colors_file" value="$(find gsvom)/config/label_colors.txt"/>
     </node>
 </launch>
