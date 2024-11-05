@@ -217,6 +217,7 @@ class VoxelMapper:
         if not (vis_data is None):
             voxel_centers, voxel_labels = vis_data
             voxel_labels = voxel_labels.squeeze().astype(int)
+            voxel_labels[voxel_labels >= self.class_colors.shape[0]] = 0
             voxel_colors = self.class_colors[voxel_labels]
 
             field_data = [voxel_centers[:, 0], voxel_centers[:, 1], voxel_centers[:, 2], voxel_colors[:, 0], voxel_colors[:, 1], voxel_colors[:, 2]]
